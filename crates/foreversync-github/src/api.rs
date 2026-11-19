@@ -110,18 +110,20 @@ impl Client {
         }
     }
 
-    /// Finds the data repo among accessible repos: one with `foreversync.json`
-    /// wins; otherwise a repo named `forever-sync-data` (to initialize).
+    /// Finds the data repo among accessible repos. A repo named
+    /// `forever-sync-data` always wins (initialized or empty); otherwise the
+    /// first repo containing `foreversync.json`.
     pub fn find_data_repo(&self) -> Result<Option<DataRepo>> {
         let repos = self.accessible_repos()?;
+        if let Some(r) = repos.iter().find(|r| r.name == DEFAULT_DATA_REPO) {
+            let initialized = self.has_file(&r.full_name, "foreversync.json")?;
+            return Ok(Some(DataRepo { repo: r.clone(), initialized }));
+        }
         for r in &repos {
             if self.has_file(&r.full_name, "foreversync.json")? {
                 return Ok(Some(DataRepo { repo: r.clone(), initialized: true }));
             }
         }
-        Ok(repos
-            .into_iter()
-            .find(|r| r.name == DEFAULT_DATA_REPO)
-            .map(|repo| DataRepo { repo, initialized: false }))
+        Ok(None)
     }
 }

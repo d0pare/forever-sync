@@ -1,5 +1,3 @@
-mod config;
-
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use foreversync_addons::{ImportPayload, default_wowup_dirs, import_string, load_inventory};
 use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration, SnapshotOutcome};
+use foreversync_core::appdata::{self, RepoConfig};
 use foreversync_core::{Changes, ForeverInstall, discovery, layout, process, scan};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, FileStore, KeychainStore, TokenStore};
@@ -115,7 +114,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = match &cli.data_dir {
         Some(d) => d.clone(),
-        None => dirs::data_local_dir().context("no app-data folder on this OS")?.join("Forever Sync"),
+        None => appdata::default_data_dir().context("no app-data folder on this OS")?,
     };
     let tokens: Box<dyn TokenStore> = match &cli.token_file {
         Some(p) => Box::new(FileStore(p.clone())),
@@ -137,7 +136,7 @@ fn main() -> Result<()> {
         }
         Command::Setup { repo } => return setup(tokens.as_ref(), &data_dir, repo.as_deref()),
         Command::Log { limit } => {
-            let store = Store::open_or_init(&data_dir.join("repo.git"))?;
+            let store = Store::open_or_init(&appdata::repo_dir(&data_dir))?;
             for c in store.log(*limit)? {
                 println!("{}  {}  {}", &c.id[..10], format_time(c.time), c.summary);
             }
@@ -147,8 +146,8 @@ fn main() -> Result<()> {
     }
 
     let install = discovery::discover(cli.root.as_deref())?;
-    let store = Store::open_or_init(&data_dir.join("repo.git"))?;
-    let engine = Engine::new(&install, &store, &data_dir.join("backups"));
+    let store = Store::open_or_init(&appdata::repo_dir(&data_dir))?;
+    let engine = Engine::new(&install, &store, &appdata::backups_dir(&data_dir));
 
     match cli.command {
         Command::Detect => detect(&install, cli.json),
@@ -187,7 +186,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Sync { first_sync, policy, force } => {
-            let cfg = config::load(&data_dir)?.context("no repo configured; run `foreversync setup` first")?;
+            let cfg = appdata::load_config(&data_dir)?.context("no repo configured; run `foreversync setup` first")?;
             let token = gh::valid_access_token(tokens.as_ref())?;
             // Privacy guard (DESIGN.md §8.3): never push to a public repo.
             let info = gh::Client::new(token.clone()).repo(&cfg.repo)?;
@@ -268,7 +267,7 @@ fn setup(tokens: &dyn TokenStore, data_dir: &std::path::Path, repo: Option<&str>
     if !info.private {
         bail!("{} is public. Make it private first: SavedVariables can contain chat and character data.", info.full_name);
     }
-    config::save(data_dir, &config::Config { repo: info.full_name.clone(), clone_url: info.clone_url.clone() })?;
+    appdata::save_config(data_dir, &RepoConfig { repo: info.full_name.clone(), clone_url: info.clone_url.clone() })?;
     println!("This machine will sync with {} (private). Run `foreversync sync`.", info.full_name);
     Ok(())
 }

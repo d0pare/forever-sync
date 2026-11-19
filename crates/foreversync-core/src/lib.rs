@@ -1,6 +1,7 @@
 //! Core of Forever Sync: finding the WoW Forever install, deciding what to
 //! sync, scanning `WTF/` and writing repo state back with backups.
 
+pub mod appdata;
 pub mod apply;
 pub mod discovery;
 pub mod forever;

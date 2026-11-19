@@ -6,9 +6,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+dirs.workspace = true
 foreversync-git.workspace = true
 full_moon.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true

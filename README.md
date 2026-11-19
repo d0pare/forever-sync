@@ -10,7 +10,7 @@ Not affiliated with Blizzard Entertainment.
 ## Layout
 
 ```
-apps/desktop/            Tauri 2 app (React + TS UI in src/, Rust shell in src-tauri/)
+apps/desktop/            Tauri 2 app: onboarding, dashboard, tray, background sync (React UI in src/, Rust in src-tauri/)
 crates/foreversync-core     Forever install discovery, rules, sync engine
 crates/foreversync-addons   WowUp reader + import string (no addon file handling)
 crates/foreversync-github   device flow, token refresh/storage, repo setup
@@ -33,5 +33,7 @@ fs sync [--first-sync use-cloud|upload-local] [--policy newest|local|remote]
 fs status | snapshot | log | apply | restore <rev>
 cd apps/desktop && pnpm install && pnpm tauri dev
 ```
+
+The desktop app keeps running in the tray when its window is closed (quit from the tray menu). It syncs a few seconds after WoW Forever exits and every 10 minutes; while the game runs it only uploads, and applies incoming changes after you quit. Release builds turn on start-at-login after setup; debug builds leave that to the Settings toggle.
 
 The CLI's data folder defaults to `~/Library/Application Support/Forever Sync` (macOS) or `%LOCALAPPDATA%\Forever Sync` (Windows); pass `--data-dir` to use another. `apply`, `restore` and `sync` never write into WTF/ while the Forever client is running. `--token-file` (or `FOREVERSYNC_TOKEN_FILE`) keeps tokens in a file instead of the keychain, for development.

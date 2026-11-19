@@ -412,7 +412,7 @@ Other risks:
 | M0 | Spikes S1–S4 | Auth model decided; WowUp import round-trip confirmed |
 | M1 ✅ (2026-11-18) | Core + CLI: Forever discovery, rules, scanner + Lua check, snapshot into a local bare repo, apply with backups, game-running gate | Live macOS install: 126 files round-trip byte-exact into a fresh install. **Deferred:** stat cache (a full scan takes about 0.5 s at 4 MB), Windows CI run |
 | M2 ✅ (2026-11-18) | Remote: device flow, token refresh + Keychain, repo setup + privacy guard, fetch/merge/push, conflict policy, restore | Two CLI machines synced through a real private GitHub repo: first sync, edits, a conflict (newest wins, recorded in the merge commit), deletion, restore; token refresh and Keychain storage verified; integration tests cover the same cases plus unapplied remote changes |
-| M3 | Desktop: Tauri shell, onboarding, dashboard, tray, autostart, process and fs watchers | Dogfood on two machines, settings only |
+| M3 🚧 (2026-11-18) | Desktop: Tauri shell, onboarding (GitHub sign-in → repo → first-sync choice), dashboard (status, sync now, last result, conflicts, skipped files), addons + WowUp import, tray (status, Sync now, Open, Quit), close-to-tray, single instance, start at login, background worker (sync 3 s after the game exits + every 10 min) | **Done:** all of the above builds and launches on macOS. **Left:** dogfood on two machines; Windows build check; a file watcher for `/reload` while playing (the 10-minute sync covers it for now) |
 | M4 | Addons: WowUp reader, folder listing, manifest merge, import string, status checklist | The reference install's 23 addons reproduce on a clean machine through one WowUp import |
 | M5 | History/restore UI, conflicts UI, signing, auto-update | Public beta |
 

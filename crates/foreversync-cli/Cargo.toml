@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-dirs.workspace = true
 foreversync-addons.workspace = true
 foreversync-core.workspace = true
 foreversync-git.workspace = true
