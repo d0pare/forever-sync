@@ -58,7 +58,53 @@ export type AddonsView = {
   synced_count: number;
 };
 
+export type HistoryKind = "snapshot" | "merge" | "restore" | "addonssource" | "other";
+export type ConflictNote = { path: string; kept: string };
+export type HistoryEntry = {
+  id: string;
+  time: number;
+  summary: string;
+  kind: HistoryKind;
+  machine: string | null;
+  trigger: string | null;
+  settings_changed: number;
+  addons_changed: number;
+  conflicts: ConflictNote[];
+  parents: string[];
+};
+export type ChangeStatus = "added" | "modified" | "deleted";
+export type SettingsFile = {
+  path: string;
+  status: ChangeStatus;
+  file: string;
+  account: string | null;
+  realm: string | null;
+  character: string | null;
+  addon: string | null;
+};
+export type HistoryDetails = {
+  entry: HistoryEntry;
+  settings: SettingsFile[];
+  addons: { name: string; status: ChangeStatus; version: string | null }[];
+};
+export type RestoreScope =
+  | { kind: "all" }
+  | { kind: "addon"; addon: string }
+  | { kind: "paths"; paths: string[] }
+  | { kind: "other"; path: string; kept: string };
+export type RestoreResult = {
+  commit: string | null;
+  files: number;
+  applied: "applied" | "game-running" | "up-to-date";
+  backup_dir: string | null;
+  pushed: boolean;
+  sync_error: string | null;
+};
+
 export const api = {
+  history: (limit?: number) => invoke<HistoryEntry[]>("history", { limit }),
+  historyDetails: (id: string) => invoke<HistoryDetails>("history_details", { id }),
+  restore: (rev: string, scope: RestoreScope) => invoke<RestoreResult>("restore", { rev, scope }),
   appState: () => invoke<AppStateView>("app_state"),
   startLogin: () => invoke<LoginStart>("start_login"),
   finishLogin: () => invoke<string>("finish_login"),

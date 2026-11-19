@@ -7,6 +7,7 @@ pub mod appdata;
 pub mod apply;
 pub mod discovery;
 pub mod forever;
+pub mod history;
 pub mod layout;
 pub mod lua;
 pub mod merge;

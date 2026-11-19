@@ -279,7 +279,7 @@ impl<'a> Engine<'a> {
         let local = self.store.files_at(&ours.to_string())?;
         let remote = self.store.files_at(&theirs.to_string())?;
         let merged = merge3(&base, &local, &remote, prefer);
-        let mut message = format!("Merge snapshots on \"{}\"\n\n", self.host);
+        let mut message = format!("Merge snapshots on \"{}\"\n\nForeverSync-Machine: {}\n", self.host, self.host);
         for c in &merged.conflicts {
             let kept = if c.kept == Side::Local { "local" } else { "remote" };
             message.push_str(&format!("ForeverSync-Conflict: {} (kept {kept})\n", c.path));
@@ -317,7 +317,38 @@ impl<'a> Engine<'a> {
             .filter(|(p, _)| !p.starts_with(layout::WTF_PREFIX))
             .collect();
         next.extend(old);
-        let msg = format!("Restore {} on \"{}\"\n\nForeverSync-Restore: {id}\n", &id[..10], self.host);
+        let msg = format!(
+            "Restore {} on \"{}\"\n\nForeverSync-Restore: {id}\nForeverSync-Machine: {}\nForeverSync-Trigger: restore\n",
+            &id[..10],
+            self.host,
+            self.host
+        );
+        let commit = self.store.snapshot(&next, &msg)?.map(|c| c.to_string());
+        Ok((commit, self.apply_head(force)?))
+    }
+
+    /// Restores only `paths` to their state at `rev` (a path missing at
+    /// `rev` is removed), as a new commit on `main`, then applies it.
+    pub fn restore_paths(&self, rev: &str, paths: &[String], force: bool) -> Result<(Option<String>, ApplyOutcome)> {
+        let id = self.store.resolve(rev)?;
+        let mut next = self.store.head_files()?;
+        for path in paths {
+            match self.store.file_at(&id, path)? {
+                Some(bytes) => {
+                    next.insert(path.clone(), bytes);
+                }
+                None => {
+                    next.remove(path);
+                }
+            }
+        }
+        let what = if paths.len() == 1 { paths[0].clone() } else { format!("{} files", paths.len()) };
+        let msg = format!(
+            "Restore {what} from {} on \"{}\"\n\nForeverSync-Restore: {id}\nForeverSync-Machine: {}\nForeverSync-Trigger: restore\n",
+            &id[..10],
+            self.host,
+            self.host
+        );
         let commit = self.store.snapshot(&next, &msg)?.map(|c| c.to_string());
         Ok((commit, self.apply_head(force)?))
     }

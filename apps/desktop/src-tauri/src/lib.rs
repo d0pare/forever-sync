@@ -115,6 +115,9 @@ pub fn run() {
             commands::remove_addons,
             commands::check_update,
             commands::install_update,
+            commands::history,
+            commands::history_details,
+            commands::restore,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -60,6 +60,21 @@ pub struct CommitInfo {
     pub time: i64,
     pub summary: String,
     pub message: String,
+    pub parents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStatus {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// A path changed by a commit, compared with its first parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathChange {
+    pub path: String,
+    pub status: PathStatus,
 }
 
 pub struct Store {
@@ -162,14 +177,49 @@ impl Store {
         walk.take(limit)
             .map(|id| {
                 let c = self.repo.find_commit(id?)?;
-                Ok(CommitInfo {
-                    id: c.id().to_string(),
-                    time: c.time().seconds(),
-                    summary: c.summary().ok().flatten().unwrap_or("").to_owned(),
-                    message: c.message().unwrap_or("").to_owned(),
-                })
+                Ok(commit_info(&c))
             })
             .collect()
+    }
+
+    /// One commit's metadata.
+    pub fn commit(&self, rev: &str) -> Result<CommitInfo> {
+        Ok(commit_info(&self.repo.revparse_single(rev)?.peel_to_commit()?))
+    }
+
+    /// Paths `rev` changed compared with its first parent (everything is
+    /// "added" for a root commit). Reads trees only, not file contents.
+    pub fn changes(&self, rev: &str) -> Result<Vec<PathChange>> {
+        let commit = self.repo.revparse_single(rev)?.peel_to_commit()?;
+        let new = commit.tree()?;
+        let old = match commit.parents().next() {
+            Some(p) => Some(p.tree()?),
+            None => None,
+        };
+        let diff = self.repo.diff_tree_to_tree(old.as_ref(), Some(&new), None)?;
+        let mut out = Vec::new();
+        for d in diff.deltas() {
+            let status = match d.status() {
+                git2::Delta::Added => PathStatus::Added,
+                git2::Delta::Deleted => PathStatus::Deleted,
+                _ => PathStatus::Modified,
+            };
+            let file = if status == PathStatus::Deleted { d.old_file() } else { d.new_file() };
+            if let Some(path) = file.path().and_then(|p| p.to_str()) {
+                out.push(PathChange { path: path.replace('\\', "/"), status });
+            }
+        }
+        Ok(out)
+    }
+
+    /// One file's contents at `rev`, if it exists there.
+    pub fn file_at(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let tree = self.repo.revparse_single(rev)?.peel_to_commit()?.tree()?;
+        match tree.get_path(Path::new(path)) {
+            Ok(entry) => Ok(Some(self.repo.find_blob(entry.id())?.content().to_vec())),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Commits `files` with explicit `parents` and moves `main` to it.
@@ -316,6 +366,16 @@ impl Store {
     }
 }
 
+fn commit_info(c: &git2::Commit) -> CommitInfo {
+    CommitInfo {
+        id: c.id().to_string(),
+        time: c.time().seconds(),
+        summary: c.summary().ok().flatten().unwrap_or("").to_owned(),
+        message: c.message().unwrap_or("").to_owned(),
+        parents: c.parent_ids().map(|p| p.to_string()).collect(),
+    }
+}
+
 fn callbacks<'a>(remote: &'a Remote, rejected: Option<&'a std::cell::RefCell<Option<String>>>) -> git2::RemoteCallbacks<'a> {
     let mut cb = git2::RemoteCallbacks::new();
     let mut attempts = 0;
@@ -425,6 +485,28 @@ mod tests {
         let remote = Remote { url: tmp.path().join("o.git").display().to_string(), token: None };
         assert_eq!(s.fetch(&remote).unwrap(), Some(o));
         assert_eq!(s.merge_base(a, o).unwrap(), None);
+    }
+
+    #[test]
+    fn changes_and_file_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Store::open_or_init(&tmp.path().join("r.git")).unwrap();
+        let c1 = s.snapshot(&set(&[("a/x.lua", "1"), ("a/y.lua", "1")]), "c1").unwrap().unwrap();
+        let c2 = s.snapshot(&set(&[("a/x.lua", "2"), ("a/z.lua", "1")]), "c2").unwrap().unwrap();
+        let mut ch = s.changes(&c2.to_string()).unwrap();
+        ch.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            ch,
+            [
+                PathChange { path: "a/x.lua".into(), status: PathStatus::Modified },
+                PathChange { path: "a/y.lua".into(), status: PathStatus::Deleted },
+                PathChange { path: "a/z.lua".into(), status: PathStatus::Added },
+            ]
+        );
+        assert_eq!(s.changes(&c1.to_string()).unwrap().len(), 2, "root: all added");
+        assert_eq!(s.file_at(&c1.to_string(), "a/y.lua").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(s.file_at(&c2.to_string(), "a/y.lua").unwrap(), None);
+        assert_eq!(s.commit(&c2.to_string()).unwrap().parents, [c1.to_string()]);
     }
 
     #[test]

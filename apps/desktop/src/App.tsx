@@ -23,6 +23,7 @@ function useCopy() {
   };
   return { copied, copy };
 }
+import { History } from "./History";
 import "./App.css";
 
 export default function App() {
@@ -272,6 +273,23 @@ function Step({ n, of, title }: { n: number; of: number; title: string }) {
 // ---------------------------------------------------------------- dashboard
 
 function Dashboard({ state, onChange }: { state: AppStateView; onChange: () => void }) {
+  const [tab, setTab] = useState<"status" | "history">("status");
+  return (
+    <>
+      <nav className="tabs">
+        <button className={tab === "status" ? "tab active" : "tab"} onClick={() => setTab("status")}>
+          Status
+        </button>
+        <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
+          History
+        </button>
+      </nav>
+      {tab === "status" ? <StatusView state={state} onChange={onChange} /> : <History onRestored={onChange} />}
+    </>
+  );
+}
+
+function StatusView({ state, onChange }: { state: AppStateView; onChange: () => void }) {
   const s = state.status;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

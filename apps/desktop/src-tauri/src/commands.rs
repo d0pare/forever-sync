@@ -11,7 +11,7 @@ use foreversync_core::appdata::{self, RepoConfig};
 use foreversync_core::sync::FirstSync;
 use foreversync_core::{ForeverInstall, discovery};
 use foreversync_github::{self as gh, KeychainStore, TokenStore};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -286,4 +286,119 @@ pub async fn check_update(app: AppHandle) -> CmdResult<Option<crate::updates::Up
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> CmdResult<()> {
     crate::updates::install(&app).await
+}
+
+// ------------------------------------------------------------------ history
+
+#[tauri::command]
+pub async fn history(app: AppHandle, limit: Option<usize>) -> CmdResult<Vec<foreversync_core::history::HistoryEntry>> {
+    blocking(move || {
+        let data_dir = app.state::<AppState>().data_dir.clone();
+        let store = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir)).map_err(|e| e.to_string())?;
+        foreversync_core::history::list(&store, limit.unwrap_or(50)).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn history_details(app: AppHandle, id: String) -> CmdResult<foreversync_core::history::HistoryDetails> {
+    blocking(move || {
+        let data_dir = app.state::<AppState>().data_dir.clone();
+        let store = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir)).map_err(|e| e.to_string())?;
+        foreversync_core::history::details(&store, &id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// What to restore from a snapshot.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum RestoreScope {
+    /// All settings (WTF) as of the snapshot.
+    All,
+    /// One addon's SavedVariables across all accounts and characters.
+    Addon { addon: String },
+    /// Specific files.
+    Paths { paths: Vec<String> },
+    /// For a conflict in merge `rev`: the version that wasn't kept.
+    Other { path: String, kept: String },
+}
+
+#[derive(Serialize)]
+pub struct RestoreResult {
+    /// New commit, or None if nothing differed.
+    commit: Option<String>,
+    files: usize,
+    /// "applied", "game-running" or "up-to-date".
+    applied: String,
+    backup_dir: Option<String>,
+    pushed: bool,
+    sync_error: Option<String>,
+}
+
+/// Restores settings from snapshot `rev` as a new commit, applies it (unless
+/// the game runs), then syncs so other computers get it too.
+#[tauri::command]
+pub async fn restore(app: AppHandle, rev: String, scope: RestoreScope) -> CmdResult<RestoreResult> {
+    blocking(move || {
+        use foreversync_core::history;
+        use foreversync_core::sync::{ApplyOutcome, Engine, FirstSync};
+
+        let state = app.state::<AppState>();
+        let (commit, files, applied) = {
+            let Ok(_guard) = state.sync_lock.try_lock() else {
+                return Err("A sync is running; try again in a moment.".into());
+            };
+            let install = discovery::discover(None).map_err(|e| e.to_string())?;
+            let store =
+                foreversync_git::Store::open_or_init(&appdata::repo_dir(&state.data_dir)).map_err(|e| e.to_string())?;
+            let engine = Engine::new(&install, &store, &appdata::backups_dir(&state.data_dir));
+            let (rev, paths): (String, Option<Vec<String>>) = match scope {
+                RestoreScope::All => (rev, None),
+                RestoreScope::Paths { paths } => (rev, Some(paths)),
+                RestoreScope::Addon { addon } => {
+                    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                    set.extend(history::addon_settings_paths(&store.files_at(&rev).map_err(|e| e.to_string())?, &addon));
+                    set.extend(history::addon_settings_paths(&store.head_files().map_err(|e| e.to_string())?, &addon));
+                    (rev, Some(set.into_iter().collect()))
+                }
+                RestoreScope::Other { path, kept } => {
+                    let entry = history::list(&store, 500)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|e| e.id == rev)
+                        .ok_or("That merge is too old to look up.")?;
+                    let note = history::ConflictNote { path: path.clone(), kept };
+                    let other = history::other_side(&entry, &note).ok_or("Not a merge.")?.to_owned();
+                    (other, Some(vec![path]))
+                }
+            };
+            let (commit, outcome, files) = match paths {
+                None => {
+                    let (c, o) = engine.restore(&rev, false).map_err(|e| e.to_string())?;
+                    (c, o, 0)
+                }
+                Some(p) if p.is_empty() => return Err("Nothing to restore.".into()),
+                Some(p) => {
+                    let n = p.len();
+                    let (c, o) = engine.restore_paths(&rev, &p, false).map_err(|e| e.to_string())?;
+                    (c, o, n)
+                }
+            };
+            (commit, files, outcome)
+        };
+        let (applied, backup_dir) = match applied {
+            ApplyOutcome::Applied(r) => ("applied", r.backup_dir.map(|p| p.display().to_string())),
+            ApplyOutcome::GameRunning => ("game-running", None),
+            ApplyOutcome::UpToDate => ("up-to-date", None),
+        };
+        // Share the restore with other computers right away.
+        let (pushed, sync_error) = match run_sync(&app, "restore", FirstSync::UseCloud, false) {
+            Ok(Some(last)) => (last.pushed, None),
+            Ok(None) => (false, None),
+            Err(e) => (false, Some(e)),
+        };
+        Ok(RestoreResult { commit, files, applied: applied.into(), backup_dir, pushed, sync_error })
+    })
+    .await
 }

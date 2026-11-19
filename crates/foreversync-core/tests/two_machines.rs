@@ -286,3 +286,65 @@ fn one_machine_can_become_the_addon_source() {
     assert!(engine.sync(Some(&remote), nw, FirstSync::UseCloud, "test", false).is_err());
     assert_eq!(foreversync_core::addon_sync::packages_in(&store.head_files().unwrap()).len(), 3);
 }
+
+#[test]
+fn history_shows_conflicts_and_restores_the_other_version() {
+    use foreversync_core::history;
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    git2::Repository::init_bare(&origin).unwrap();
+    let remote = Remote { url: origin.display().to_string(), token: None };
+    let a = Machine::new(tmp.path(), "a");
+    let b = Machine::new(tmp.path(), "b");
+    let nw = ConflictPolicy::NewestWins;
+    let plater = format!("{SV}/Plater.lua");
+
+    a.write(&plater, &lua("PlaterDB", "1"));
+    a.write("Account/ACCT/93/Alpha-One/SavedVariables/Plater.lua", &lua("PlaterChar", "1"));
+    a.sync(&remote, nw, FirstSync::UseCloud);
+    b.sync(&remote, nw, FirstSync::UseCloud);
+
+    a.write(&plater, &lua("PlaterDB", "a"));
+    a.sync(&remote, nw, FirstSync::UseCloud);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    b.write(&plater, &lua("PlaterDB", "b"));
+    b.sync(&remote, nw, FirstSync::UseCloud); // merge on B keeps B's (newer) version
+
+    let store = Store::open_or_init(&b.data.join("repo.git")).unwrap();
+    let entries = history::list(&store, 20).unwrap();
+    let merge = entries.iter().find(|e| e.kind == history::Kind::Merge).expect("a merge entry");
+    assert_eq!(merge.conflicts.len(), 1);
+    assert_eq!(merge.conflicts[0].path, format!("wtf/{plater}"));
+    assert_eq!(merge.conflicts[0].kept, "local");
+    assert!(entries.iter().all(|e| e.machine.is_some()), "every entry names a machine");
+
+    // "Use the other version": restore A's file from the merge's other parent.
+    let other = history::other_side(merge, &merge.conflicts[0]).unwrap().to_owned();
+    let install = discovery::open(&b.root).unwrap();
+    let mut engine = Engine::new(&install, &store, &b.data.join("backups"));
+    engine.wowup_dirs = Vec::new();
+    let (commit, applied) = engine.restore_paths(&other, &[format!("wtf/{plater}")], false).unwrap();
+    assert!(commit.is_some());
+    assert!(matches!(applied, ApplyOutcome::Applied(_)));
+    assert_eq!(b.read(&plater).unwrap(), lua("PlaterDB", "a"));
+
+    // The restore shows up as a Restore entry with one settings change.
+    let latest = &history::list(&store, 1).unwrap()[0];
+    assert_eq!(latest.kind, history::Kind::Restore);
+    assert_eq!(latest.settings_changed, 1);
+    let det = history::details(&store, &latest.id).unwrap();
+    assert_eq!(det.settings[0].addon.as_deref(), Some("Plater"));
+
+    // Restore one addon's settings across characters from the first snapshot.
+    let first = entries.last().unwrap().id.clone();
+    let files = store.files_at(&first).unwrap();
+    let paths = history::addon_settings_paths(&files, "Plater");
+    assert_eq!(paths.len(), 2);
+    engine.restore_paths(&first, &paths, false).unwrap();
+    assert_eq!(b.read(&plater).unwrap(), lua("PlaterDB", "1"));
+
+    // And it reaches A on its next sync.
+    b.sync(&remote, nw, FirstSync::UseCloud);
+    a.sync(&remote, nw, FirstSync::UseCloud);
+    assert_eq!(a.read(&plater).unwrap(), lua("PlaterDB", "1"));
+}

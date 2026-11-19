@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use foreversync_addons::{ImportPayload, default_wowup_dirs, import_string, load_inventory};
 use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration, SnapshotOutcome};
 use foreversync_core::appdata::{self, RepoConfig};
-use foreversync_core::{Changes, ForeverInstall, addon_cleanup, addon_sync, discovery, layout, process, scan};
+use foreversync_core::{Changes, ForeverInstall, addon_cleanup, addon_sync, discovery, history, layout, process, scan};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, FileStore, KeychainStore, TokenStore};
 
@@ -106,9 +106,22 @@ enum Command {
     Restore {
         /// Commit id prefix, `main~2`, …
         rev: String,
+        /// Only this addon's SavedVariables (all accounts and characters).
+        #[arg(long, conflicts_with = "path")]
+        addon: Option<String>,
+        /// Only these repo paths (e.g. wtf/Account/X/SavedVariables/Plater.lua); repeatable.
+        #[arg(long)]
+        path: Vec<String>,
         #[arg(long)]
         force: bool,
     },
+    /// Readable history: who synced what, conflicts, restores.
+    History {
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// What one commit changed (settings grouped by addon, addon list changes).
+    Show { rev: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -199,8 +212,27 @@ fn main() -> Result<()> {
             print_apply(&engine.apply_head(force)?);
             Ok(())
         }
-        Command::Restore { rev, force } => {
-            let (commit, applied) = engine.restore(&rev, force)?;
+        Command::Restore { rev, addon, path, force } => {
+            let paths = match (&addon, path.is_empty()) {
+                (Some(a), _) => {
+                    let mut set = std::collections::BTreeSet::new();
+                    set.extend(history::addon_settings_paths(&store.files_at(&rev)?, a));
+                    set.extend(history::addon_settings_paths(&store.head_files()?, a));
+                    if set.is_empty() {
+                        bail!("no SavedVariables for addon {a} at {rev} or now");
+                    }
+                    Some(set.into_iter().collect::<Vec<_>>())
+                }
+                (None, false) => Some(path),
+                (None, true) => None,
+            };
+            let (commit, applied) = match paths {
+                Some(p) => {
+                    println!("Restoring {} file(s) from {rev}.", p.len());
+                    engine.restore_paths(&rev, &p, force)?
+                }
+                None => engine.restore(&rev, force)?,
+            };
             match commit {
                 Some(c) => println!("Restore committed as {}", &c[..10]),
                 None => println!("Latest commit already matches {rev}."),
@@ -259,6 +291,54 @@ fn main() -> Result<()> {
                 println!("Pushed to {}.", cfg.repo);
             }
             print_apply(&report.apply);
+            Ok(())
+        }
+        Command::History { limit } => {
+            for e in history::list(&store, limit)? {
+                let mut extra = Vec::new();
+                if e.settings_changed > 0 {
+                    extra.push(format!("{} settings", e.settings_changed));
+                }
+                if e.addons_changed > 0 {
+                    extra.push(format!("{} addons", e.addons_changed));
+                }
+                if !e.conflicts.is_empty() {
+                    extra.push(format!("{} conflict(s)", e.conflicts.len()));
+                }
+                println!(
+                    "{}  {}  {:<14} {:?}/{}  {}",
+                    &e.id[..10],
+                    format_time(e.time),
+                    e.machine.as_deref().unwrap_or("?"),
+                    e.kind,
+                    e.trigger.as_deref().unwrap_or("-"),
+                    extra.join(", ")
+                );
+            }
+            Ok(())
+        }
+        Command::Show { rev } => {
+            let d = history::details(&store, &rev)?;
+            println!("{}  {}  {}", &d.entry.id[..10], format_time(d.entry.time), d.entry.summary);
+            for c in &d.entry.conflicts {
+                println!("  conflict: {} (kept {})", c.path, c.kept);
+            }
+            let mut last = None;
+            for f in &d.settings {
+                if last != Some(&f.addon) {
+                    println!("  {}:", f.addon.as_deref().unwrap_or("Other settings"));
+                    last = Some(&f.addon);
+                }
+                let who = match (&f.character, &f.account) {
+                    (Some(c), _) => format!("char {c}"),
+                    (None, Some(a)) => format!("account {a}"),
+                    _ => "all accounts".into(),
+                };
+                println!("    {:<8} {who} · {}", format!("{:?}", f.status).to_lowercase(), f.file);
+            }
+            for a in &d.addons {
+                println!("  addon {:<8} {}", format!("{:?}", a.status).to_lowercase(), a.name);
+            }
             Ok(())
         }
         Command::Login | Command::Logout | Command::Whoami | Command::Setup { .. } | Command::Log { .. } => {
