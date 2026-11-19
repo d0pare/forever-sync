@@ -34,6 +34,11 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--background"])))
         .manage(AppState::new(data_dir))
         .setup(|app| {
+            // Menu-bar-only on macOS (also set via LSUIElement in Info.plist;
+            // this covers `tauri dev`, which doesn't use the bundle's plist).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let status = MenuItem::with_id(app, "status", "Not synced yet", false, None::<&str>)?;
             let sync = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Forever Sync", true, None::<&str>)?;
