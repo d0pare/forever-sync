@@ -72,3 +72,6 @@ button.link { border: none; background: none; padding: 0; color: var(--accent); 
 .pill.warn { color: var(--warn); border-color: var(--warn); }
 .pill.bad { color: var(--error); border-color: var(--error); }
 .toggle { display: flex; gap: 8px; align-items: center; margin: 4px 0 8px; }
+.callout { border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.callout button.primary { margin-top: 0; }
+.ok-text { color: var(--ok); }

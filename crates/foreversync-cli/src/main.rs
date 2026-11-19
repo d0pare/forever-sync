@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use foreversync_addons::{ImportPayload, default_wowup_dirs, import_string, load_inventory};
 use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration, SnapshotOutcome};
 use foreversync_core::appdata::{self, RepoConfig};
-use foreversync_core::{Changes, ForeverInstall, discovery, layout, process, scan};
+use foreversync_core::{Changes, ForeverInstall, addon_sync, discovery, layout, process, scan};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, FileStore, KeychainStore, TokenStore};
 
@@ -40,9 +40,12 @@ enum Command {
     Detect,
     /// List addons WowUp manages for Forever, and folders it doesn't.
     Addons {
-        /// Print only the WowUp import string.
+        /// Print only the WowUp import string (all addons on this machine).
         #[arg(long)]
         import_string: bool,
+        /// Print only the WowUp import string for synced addons missing here.
+        #[arg(long, conflicts_with = "import_string")]
+        missing: bool,
         /// WowUp data folder (default: WowUpCf, then WowUp, in the OS config dir).
         #[arg(long)]
         wowup_dir: Option<PathBuf>,
@@ -70,6 +73,10 @@ enum Command {
         /// Apply even if a Forever client seems to be running.
         #[arg(long)]
         force: bool,
+        /// Make this computer's WowUp addon list the synced list (drops addons
+        /// that came only from other computers).
+        #[arg(long)]
+        addons_source: bool,
     },
     /// Show local WTF/ changes not yet recorded in a snapshot.
     Status,
@@ -151,7 +158,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Detect => detect(&install, cli.json),
-        Command::Addons { import_string, wowup_dir } => addons(&install, cli.json, import_string, wowup_dir),
+        Command::Addons { import_string, missing, wowup_dir } => {
+            addons(&install, &store, cli.json, import_string, missing, wowup_dir)
+        }
         Command::Status => {
             let scanned = scan::scan_wtf(&install.wtf_dir())?;
             report_skips(&scanned.skipped);
@@ -185,7 +194,7 @@ fn main() -> Result<()> {
             print_apply(&applied);
             Ok(())
         }
-        Command::Sync { first_sync, policy, force } => {
+        Command::Sync { first_sync, policy, force, addons_source } => {
             let cfg = appdata::load_config(&data_dir)?.context("no repo configured; run `foreversync setup` first")?;
             let token = gh::valid_access_token(tokens.as_ref())?;
             // Privacy guard (DESIGN.md §8.3): never push to a public repo.
@@ -203,6 +212,8 @@ fn main() -> Result<()> {
                 PolicyArg::Local => ConflictPolicy::PreferLocal,
                 PolicyArg::Remote => ConflictPolicy::PreferRemote,
             };
+            let mut engine = engine;
+            engine.addons_source = addons_source;
             let report = engine.sync(Some(&remote), policy, first, "manual", force)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -218,6 +229,17 @@ fn main() -> Result<()> {
                     }
                 }
                 Integration::UpToDate | Integration::LocalAhead | Integration::NoRemote => {}
+            }
+            if let Some(reset) = &report.addon_list_reset {
+                println!(
+                    "Addon list now matches this computer: {} added, {} updated, {} removed.",
+                    reset.added.len(),
+                    reset.modified.len(),
+                    reset.deleted.len()
+                );
+                for p in &reset.deleted {
+                    println!("  removed from list: {p}");
+                }
             }
             if report.pushed {
                 println!("Pushed to {}.", cfg.repo);
@@ -317,17 +339,31 @@ fn detect(install: &ForeverInstall, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn addons(install: &ForeverInstall, json: bool, only_string: bool, wowup_dir: Option<PathBuf>) -> Result<()> {
+fn addons(
+    install: &ForeverInstall,
+    store: &Store,
+    json: bool,
+    only_string: bool,
+    only_missing: bool,
+    wowup_dir: Option<PathBuf>,
+) -> Result<()> {
     let dirs = wowup_dir.map(|d| vec![d]).unwrap_or_else(default_wowup_dirs);
     let inv = load_inventory(&dirs, &install.flavor_dir, &install.addons_dir())?;
     let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let payload = ImportPayload::from_addons(&inv.managed, now_ms);
     let string = import_string(&payload);
+    let synced = store.head_files()?;
+    let status = (!addon_sync::packages_in(&synced).is_empty()).then(|| addon_sync::status(&synced, &inv));
 
-    if only_string {
+    if only_missing {
+        match status.as_ref().and_then(|s| s.missing_import.clone()) {
+            Some(s) => println!("{s}"),
+            None => eprintln!("Nothing missing: every synced addon is installed here."),
+        }
+    } else if only_string {
         println!("{string}");
     } else if json {
-        let out = serde_json::json!({ "inventory": inv, "import_payload": payload, "import_string": string });
+        let out = serde_json::json!({ "inventory": inv, "import_payload": payload, "import_string": string, "status": status });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         println!("WowUp data: {}", inv.wowup_dir.display());
@@ -347,6 +383,24 @@ fn addons(install: &ForeverInstall, json: bool, only_string: bool, wowup_dir: Op
         }
         if inv.dropped_records > 0 {
             println!("\n({} stale or duplicate WowUp records ignored)", inv.dropped_records);
+        }
+        match &status {
+            None => println!("\nNo synced addon list yet (run `foreversync sync`)."),
+            Some(st) => {
+                println!("\nSynced list: {} installed here", st.in_sync);
+                if !st.missing.is_empty() {
+                    println!("Missing here ({}), install with `foreversync addons --missing` → WowUp import:", st.missing.len());
+                    for p in &st.missing {
+                        println!("  {}", p.name);
+                    }
+                }
+                if !st.removed_elsewhere.is_empty() {
+                    println!("Uninstalled on another machine ({}), remove in WowUp if unwanted:", st.removed_elsewhere.len());
+                    for p in &st.removed_elsewhere {
+                        println!("  {}", p.name);
+                    }
+                }
+            }
         }
         println!("\nWowUp import string ({} chars): run with --import-string to print it", string.len());
     }

@@ -185,8 +185,7 @@ foreversync.json                schema version, machines registry, repo settings
 .gitattributes                  "* -text"   (byte-exact, no EOL conversion)
 README.md                       what this is, and "keep this repo private"
 wtf/Account/...                 filtered mirror of _forever_/WTF/Account
-addons/manifest.json            installed addon set (§6.2)
-addons/wowup-import.txt         ready-to-paste WowUp import string (§6.3)
+addons/packages/<provider>-<id>.json   one file per WowUp-managed addon (§6.2)
 rules.json                      synced exclusions
 ```
 
@@ -223,17 +222,20 @@ Addons that WowUp doesn't manage (hand-installed, or ones WowUp couldn't match) 
    - confirm that a WowUp record's `installedFolders` exist on disk (this drops stale records),
    - flag folders that no WowUp record covers, or whose record is `isIgnored` (how WowUp marks addons it couldn't match), as **not managed by WowUp**. These are shown in the UI only and never synced.
 
-### 6.2 Manifest (`addons/manifest.json`)
-This is the source of truth. The 3-way merge (§7.3) runs over it, with one package per entry:
+### 6.2 Addon list in the repo (`addons/packages/`)
+Each WowUp-managed addon is **one small JSON file**, `addons/packages/<provider>-<id>.json`:
 ```json
-{
-  "key": "wowup:Curse:1076354",
-  "name": "Enhance QoL",
-  "wowup": { "provider": "Curse", "id": "1076354", "versionId": "7123456", "version": "13.23.0-forever" },
-  "folders": ["EnhanceQoL", "EnhanceQoLBags", "..."],   // display + "is it installed here?" check
-  "state": "installed"                  // or "removed" (tombstone)
-}
+{ "name": "Enhance QoL", "provider": "Curse", "id": "1076354",
+  "version": "13.23.0-forever", "version_id": "7123456", "folders": ["EnhanceQoL", "..."] }
 ```
+One file per addon lets the ordinary per-file merge (§7.3) handle the list:
+- addons added on either machine are combined,
+- an uninstall deletes the file, and the deletion propagates,
+- the same addon updated on both machines is a conflict where the newer version wins (not shown to the user).
+
+Local changes to the list are measured against what WowUp reported **last time** on this machine (the same "observed state" as for WTF/, §7.2). So an addon this machine simply hasn't installed yet is never treated as removed. If WowUp can't be read, the last known list is kept and nothing is removed.
+
+The import string is not stored. The app builds it from the list when needed: for all addons, or for just the missing ones.
 
 ### 6.3 WowUp import string
 This is WowUp's own export format, read from WowUp-CF 2.25.5 (`getExportPayload` / `getImportSummary`):
@@ -247,7 +249,7 @@ This is WowUp's own export format, read from WowUp-CF 2.25.5 (`getExportPayload`
 }
 ```
 - The string is this JSON **base64-encoded**. WowUp also accepts raw JSON when the text starts with `{`.
-- Built from the merged manifest (packages with `state: "installed"`), written to `addons/wowup-import.txt` on every commit so it can be copied from github.com even without the app, and shown in the app with a **Copy** button and an **Open WowUp** button.
+- Built on demand from the synced list (§6.2): for all addons on this machine, or for just the ones missing here. Shown in the app with **Copy** buttons; `foreversync addons --import-string` / `--missing` in the CLI.
 
 How WowUp handles an import (this sets what we can promise):
 | Situation on the receiving machine | WowUp's behavior |
@@ -260,11 +262,14 @@ How WowUp handles an import (this sets what we can promise):
 
 In short, the import adds missing addons. It never removes them and never downgrades. Versions then converge, because WowUp keeps both machines on latest.
 
-### 6.4 Status and removals
-- After every sync, compare the manifest with this machine's WowUp inventory. Each addon gets a status: **in sync**, **missing** (needs WowUp import), **outdated or newer** (informational only) or **removed elsewhere**. Folders WowUp doesn't manage on this machine are listed separately as **not managed by WowUp**.
-- **Missing addons** trigger one notification: "3 addons from MacBook aren't installed. Copy the WowUp import string?"
-- **Removed elsewhere** (`state: "removed"` tombstone): shown as "remove in WowUp". Forever Sync never deletes addon folders.
-- Addons WowUp installs show up in the next inventory scan (when `addons.json` changes), so the status clears without a manual step.
+### 6.4 Status and removals (as implemented: `foreversync-core/src/addon_sync.rs`)
+- After every sync, compare the synced list with this machine's WowUp inventory:
+  - **missing**: in the list, not installed here,
+  - **removed elsewhere**: installed here, gone from the list,
+  - **in sync**: present in both. Version differences don't count; WowUp keeps each machine on latest.
+- **Missing addons** show as a highlighted callout with **Copy WowUp import for these** (a string for just the missing ones), and the tray says "N addons to install with WowUp". The CLI equivalent is `foreversync addons --missing`.
+- **Removed elsewhere** shows as "remove in WowUp if you don't want them here". Forever Sync never deletes addon folders.
+- After WowUp installs them, the next sync records them and the status clears.
 
 ---
 
@@ -413,7 +418,7 @@ Other risks:
 | M1 ✅ (2026-11-18) | Core + CLI: Forever discovery, rules, scanner + Lua check, snapshot into a local bare repo, apply with backups, game-running gate | Live macOS install: 126 files round-trip byte-exact into a fresh install. **Deferred:** stat cache (a full scan takes about 0.5 s at 4 MB), Windows CI run |
 | M2 ✅ (2026-11-18) | Remote: device flow, token refresh + Keychain, repo setup + privacy guard, fetch/merge/push, conflict policy, restore | Two CLI machines synced through a real private GitHub repo: first sync, edits, a conflict (newest wins, recorded in the merge commit), deletion, restore; token refresh and Keychain storage verified; integration tests cover the same cases plus unapplied remote changes |
 | M3 🚧 (2026-11-18) | Desktop: Tauri shell, onboarding (GitHub sign-in → repo → first-sync choice), dashboard (status, sync now, last result, conflicts, skipped files), addons + WowUp import, tray (status, Sync now, Open, Quit), close-to-tray, single instance, start at login, background worker (sync 3 s after the game exits + every 10 min) | **Done:** all of the above builds and launches on macOS. **Left:** dogfood on two machines; Windows build check; a file watcher for `/reload` while playing (the 10-minute sync covers it for now) |
-| M4 | Addons: WowUp reader, folder listing, manifest merge, import string, status checklist | The reference install's 23 addons reproduce on a clean machine through one WowUp import |
+| M4 ✅ (2026-11-18) | Addon list through the repo: one file per WowUp addon, merged per addon, missing / removed-elsewhere status, import string for missing addons in the app, tray and CLI | Two-machine test: lists combine, missing addons reported, install clears them, uninstall propagates as "removed elsewhere", unreadable WowUp never drops addons |
 | M5 | History/restore UI, conflicts UI, signing, auto-update | Public beta |
 
 ---

@@ -46,7 +46,7 @@ pub fn run() {
                     "sync" => {
                         let app = app.clone();
                         std::thread::spawn(move || {
-                            let _ = syncer::run_sync(&app, "manual", FirstSync::UseCloud);
+                            let _ = syncer::run_sync(&app, "manual", FirstSync::UseCloud, false);
                         });
                     }
                     "open" => show_main(app),

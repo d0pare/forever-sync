@@ -2,6 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, AddonsView, AppStateView, LastSync, LoginStart, RepoChoice, RepoSearch, Status } from "./api";
+
+function useCopy() {
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = async (key: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 1500);
+  };
+  return { copied, copy };
+}
 import "./App.css";
 
 export default function App() {
@@ -281,7 +291,7 @@ function Dashboard({ state, onChange }: { state: AppStateView; onChange: () => v
           Syncs automatically when you quit WoW and every 10 minutes. {state.install && <>Game: {state.install.root}</>}
         </p>
       </section>
-      <Addons />
+      <Addons lastSyncAt={s.last_sync?.at ?? 0} />
       <Settings state={state} onChange={onChange} />
     </>
   );
@@ -308,6 +318,7 @@ function LastSyncView({ last }: { last: LastSync }) {
   if (last.local_changes) parts.push(`${last.local_changes} local change${last.local_changes === 1 ? "" : "s"} uploaded`);
   if (last.took_remote) parts.push("changes from another computer received");
   if (last.written || last.deleted) parts.push(`${last.written + last.deleted} file${last.written + last.deleted === 1 ? "" : "s"} updated in WTF`);
+  if (last.addon_changes) parts.push(`addon list updated`);
   if (!parts.length) parts.push("nothing new");
   return (
     <>
@@ -344,40 +355,70 @@ function LastSyncView({ last }: { last: LastSync }) {
 
 function triggerLabel(t: string) {
   return (
-    { manual: "manual", "game-exit": "after quitting WoW", schedule: "scheduled", "while-playing": "while playing" }[t] ?? t
+    {
+      manual: "manual",
+      "game-exit": "after quitting WoW",
+      schedule: "scheduled",
+      "while-playing": "while playing",
+      "addons-source": "addon list set from this computer",
+    }[t] ?? t
   );
 }
 
-function Addons() {
+function Addons({ lastSyncAt }: { lastSyncAt: number }) {
   const [view, setView] = useState<AddonsView | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
   useEffect(() => {
-    api.addons().then(setView).catch((e) => setView({ inventory: null, error: String(e), import_string: null }));
-  }, []);
-  const copy = async () => {
-    if (!view?.import_string) return;
-    await navigator.clipboard.writeText(view.import_string);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
+    api.addons().then(setView).catch((e) =>
+      setView({ inventory: null, error: String(e), import_string: null, status: null, synced_count: 0 }),
+    );
+  }, [lastSyncAt]); // refresh after every sync
   const inv = view?.inventory;
+  const st = view?.status;
   return (
     <section>
-      <div className="row">
-        <h2>Addons (via WowUp)</h2>
-        <button onClick={copy} disabled={!view?.import_string}>
-          {copied ? "Copied" : "Copy WowUp import"}
-        </button>
-      </div>
-      <p className="muted small">
-        Paste into WowUp → My Addons → Import/Export Addons on another computer to install the same addons.
-      </p>
+      <h2>Addons (via WowUp)</h2>
       {!view && <p className="muted">Reading WowUp…</p>}
       {view?.error && <p className="error">{view.error}</p>}
+
+      {st && st.missing.length > 0 && (
+        <div className="callout">
+          <div className="row">
+            <strong>
+              {st.missing.length} addon{st.missing.length === 1 ? "" : "s"} from your other computer{" "}
+              {st.missing.length === 1 ? "isn’t" : "aren’t"} installed here
+            </strong>
+            <button className="primary" onClick={() => copy("missing", st.missing_import!)}>
+              {copied === "missing" ? "Copied" : "Copy WowUp import for these"}
+            </button>
+          </div>
+          <p className="muted small">{st.missing.map((p) => p.name).join(", ")}</p>
+          <p className="muted small">
+            In WowUp: select WoW Forever → My Addons → Import/Export Addons → paste → Install. This list updates
+            after the next sync.
+          </p>
+        </div>
+      )}
+      {st && st.removed_elsewhere.length > 0 && (
+        <div className="warn">
+          <p>
+            Uninstalled on your other computer; remove in WowUp if you don’t want{" "}
+            {st.removed_elsewhere.length === 1 ? "it" : "them"} here:
+          </p>
+          <p className="small">{st.removed_elsewhere.map((p) => p.name).join(", ")}</p>
+        </div>
+      )}
+      {st && st.missing.length === 0 && st.removed_elsewhere.length === 0 && (
+        <p className="ok-text">All {st.in_sync} synced addons are installed here.</p>
+      )}
+      {!st && inv && (
+        <p className="muted small">The addon list is shared with your other computers after the next sync.</p>
+      )}
+
       {inv && (
         <>
           <details>
-            <summary>{inv.managed.length} addons managed by WowUp</summary>
+            <summary>{inv.managed.length} addons installed here (WowUp)</summary>
             <table>
               <tbody>
                 {inv.managed.map((a) => (
@@ -392,9 +433,60 @@ function Addons() {
           {inv.unmanaged_folders.length > 0 && (
             <p className="muted small">Not managed by WowUp (not synced): {inv.unmanaged_folders.join(", ")}</p>
           )}
+          <p className="small">
+            <button className="link" onClick={() => copy("all", view!.import_string!)} disabled={!view?.import_string}>
+              {copied === "all" ? "Copied" : "Copy WowUp import for all addons on this computer"}
+            </button>
+          </p>
+          <MakeAddonSource count={inv.managed.length} />
         </>
       )}
     </section>
+  );
+}
+
+function MakeAddonSource({ count }: { count: number }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const go = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.makeAddonSource();
+      setMsg("Done. Your other computers will show what to install or remove after their next sync.");
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+  if (!confirming)
+    return (
+      <p className="small">
+        <button className="link" onClick={() => setConfirming(true)}>
+          Make this computer’s addons the list to follow…
+        </button>
+        {msg && <span className="muted"> {msg}</span>}
+      </p>
+    );
+  return (
+    <div className="callout">
+      <p className="small">
+        The synced addon list will become exactly the {count} addons installed here. Addons that came only from your
+        other computers are dropped from the list, and those computers will be told to remove them in WowUp. No addon
+        files are deleted anywhere.
+      </p>
+      <div className="row">
+        <button onClick={() => setConfirming(false)} disabled={busy}>
+          Cancel
+        </button>
+        <button className="primary" onClick={go} disabled={busy}>
+          {busy ? "Syncing…" : "Use this computer’s addon list"}
+        </button>
+      </div>
+    </div>
   );
 }
 

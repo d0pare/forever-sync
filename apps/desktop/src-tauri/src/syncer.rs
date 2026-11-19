@@ -3,7 +3,8 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration};
-use foreversync_core::{appdata, discovery};
+use foreversync_addons::{default_wowup_dirs, load_inventory};
+use foreversync_core::{addon_sync, appdata, discovery};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, KeychainStore};
 use tauri::{AppHandle, Emitter, Manager};
@@ -13,12 +14,12 @@ use crate::state::{AppState, LastSync, Status};
 const PRIVACY_RECHECK: Duration = Duration::from_secs(60 * 60);
 
 /// Runs a full sync. Returns `Ok(None)` if another sync is already running.
-pub fn run_sync(app: &AppHandle, trigger: &str, first: FirstSync) -> Result<Option<LastSync>, String> {
+pub fn run_sync(app: &AppHandle, trigger: &str, first: FirstSync, addons_source: bool) -> Result<Option<LastSync>, String> {
     let state = app.state::<AppState>();
     let Ok(_guard) = state.sync_lock.try_lock() else { return Ok(None) };
     update_status(app, |s| s.syncing = true);
 
-    let result = sync_inner(&state, trigger, first);
+    let result = sync_inner(&state, trigger, first, addons_source);
     update_status(app, |s| {
         s.syncing = false;
         match &result {
@@ -32,7 +33,7 @@ pub fn run_sync(app: &AppHandle, trigger: &str, first: FirstSync) -> Result<Opti
     result.map(Some)
 }
 
-fn sync_inner(state: &AppState, trigger: &str, first: FirstSync) -> Result<LastSync, String> {
+fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: bool) -> Result<LastSync, String> {
     let cfg = appdata::load_config(&state.data_dir)
         .map_err(|e| e.to_string())?
         .ok_or("Choose a GitHub repo first.")?;
@@ -53,13 +54,18 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync) -> Result<LastS
 
     let install = discovery::discover(None).map_err(|e| e.to_string())?;
     let store = Store::open_or_init(&appdata::repo_dir(&state.data_dir)).map_err(|e| e.to_string())?;
-    let engine = Engine::new(&install, &store, &appdata::backups_dir(&state.data_dir));
+    let mut engine = Engine::new(&install, &store, &appdata::backups_dir(&state.data_dir));
+    engine.addons_source = addons_source;
     let remote = Remote { url: cfg.clone_url, token: Some(token) };
     let report = engine
         .sync(Some(&remote), ConflictPolicy::NewestWins, first, trigger, false)
         .map_err(|e| e.to_string())?;
 
     let changes = &report.snapshot.changes;
+    let addon_changes = &report.snapshot.addon_changes;
+    let addons = load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir())
+        .ok()
+        .and_then(|inv| store.head_files().ok().map(|head| addon_sync::status(&head, &inv)));
     let (written, deleted, pending_apply) = match &report.apply {
         ApplyOutcome::Applied(r) => (r.written, r.deleted, false),
         ApplyOutcome::GameRunning => (0, 0, true),
@@ -70,8 +76,12 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync) -> Result<LastS
         trigger: trigger.to_owned(),
         local_changes: changes.added.len() + changes.modified.len() + changes.deleted.len(),
         took_remote: matches!(report.integration, Integration::FastForward | Integration::Merged { .. }),
+        // Addon-list conflicts are just two versions of the same addon; only
+        // settings files are worth showing.
         conflicts: match &report.integration {
-            Integration::Merged { conflicts } => conflicts.iter().map(|c| c.path.clone()).collect(),
+            Integration::Merged { conflicts } => {
+                conflicts.iter().filter(|c| c.path.starts_with("wtf/")).map(|c| c.path.clone()).collect()
+            }
             _ => Vec::new(),
         },
         pushed: report.pushed,
@@ -79,6 +89,9 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync) -> Result<LastS
         deleted,
         pending_apply,
         skipped: report.snapshot.skipped.iter().map(|s| format!("{}: {}", s.path, s.reason)).collect(),
+        addons_missing: addons.as_ref().map_or(0, |a| a.missing.len()),
+        addons_removed_elsewhere: addons.as_ref().map_or(0, |a| a.removed_elsewhere.len()),
+        addon_changes: addon_changes.added.len() + addon_changes.modified.len() + addon_changes.deleted.len(),
     })
 }
 
@@ -101,6 +114,8 @@ pub fn tray_text(s: &Status) -> String {
         "Syncing…".into()
     } else if s.last_error.is_some() {
         "Sync problem: open Forever Sync".into()
+    } else if let Some(n) = s.last_sync.as_ref().map(|l| l.addons_missing).filter(|n| *n > 0) {
+        format!("{n} addon{} to install with WowUp", if n == 1 { "" } else { "s" })
     } else if s.last_sync.as_ref().is_some_and(|l| l.pending_apply) {
         "Changes wait until you quit WoW".into()
     } else if s.last_sync.is_some() {

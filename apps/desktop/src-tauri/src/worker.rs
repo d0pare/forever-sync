@@ -46,11 +46,11 @@ fn run(app: AppHandle) {
 
         if was_running && !running {
             std::thread::sleep(SETTLE);
-            let _ = run_sync(&app, "game-exit", FirstSync::UseCloud);
+            let _ = run_sync(&app, "game-exit", FirstSync::UseCloud, false);
             next_periodic = Instant::now() + PERIOD;
         } else if Instant::now() >= next_periodic {
             let trigger = if running { "while-playing" } else { "schedule" };
-            if run_sync(&app, trigger, FirstSync::UseCloud).is_err() {
+            if run_sync(&app, trigger, FirstSync::UseCloud, false).is_err() {
                 install = None; // rediscover next time (install may have moved)
             }
             next_periodic = Instant::now() + PERIOD;

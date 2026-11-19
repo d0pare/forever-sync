@@ -4,6 +4,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreversync_addons::{ImportPayload, Inventory, default_wowup_dirs, import_string, load_inventory};
+use foreversync_core::addon_sync::{self, AddonStatus};
 use foreversync_core::appdata::{self, RepoConfig};
 use foreversync_core::sync::FirstSync;
 use foreversync_core::{ForeverInstall, discovery};
@@ -166,13 +167,14 @@ pub async fn choose_repo(app: AppHandle, full_name: String) -> CmdResult<RepoCho
 /// Runs a sync now. `first_sync` ("use-cloud" | "upload-local") only matters
 /// on this machine's first sync; the first successful one completes onboarding.
 #[tauri::command]
-pub async fn sync_now(app: AppHandle, first_sync: Option<String>) -> CmdResult<Option<LastSync>> {
+pub async fn sync_now(app: AppHandle, first_sync: Option<String>, addons_source: Option<bool>) -> CmdResult<Option<LastSync>> {
     blocking(move || {
         let first = match first_sync.as_deref() {
             Some("upload-local") => FirstSync::UploadLocal,
             _ => FirstSync::UseCloud,
         };
-        let result = run_sync(&app, "manual", first)?;
+        let trigger = if addons_source == Some(true) { "addons-source" } else { "manual" };
+        let result = run_sync(&app, trigger, first, addons_source == Some(true))?;
         let data_dir = app.state::<AppState>().data_dir.clone();
         let mut settings = DesktopSettings::load(&data_dir);
         if result.is_some() && !settings.onboarded {
@@ -200,21 +202,32 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<bool> {
 pub struct AddonsView {
     inventory: Option<Inventory>,
     error: Option<String>,
+    /// Import string for everything installed here.
     import_string: Option<String>,
+    /// This machine vs the synced list (from the last sync; no network).
+    status: Option<AddonStatus>,
+    /// Number of addons in the synced list.
+    synced_count: usize,
 }
 
-/// WowUp addon list and import string (read-only).
+/// WowUp addon list, how it compares with the synced list, import strings.
 #[tauri::command]
-pub async fn addons() -> CmdResult<AddonsView> {
-    blocking(|| {
+pub async fn addons(app: AppHandle) -> CmdResult<AddonsView> {
+    blocking(move || {
         let install = discovery::discover(None).map_err(|e| e.to_string())?;
+        let data_dir = app.state::<AppState>().data_dir.clone();
+        let synced = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir))
+            .and_then(|s| s.head_files())
+            .unwrap_or_default();
+        let synced_count = addon_sync::packages_in(&synced).len();
         Ok(match load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir()) {
             Ok(inv) => {
                 let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
                 let s = import_string(&ImportPayload::from_addons(&inv.managed, now_ms));
-                AddonsView { inventory: Some(inv), error: None, import_string: Some(s) }
+                let status = (synced_count > 0).then(|| addon_sync::status(&synced, &inv));
+                AddonsView { inventory: Some(inv), error: None, import_string: Some(s), status, synced_count }
             }
-            Err(e) => AddonsView { inventory: None, error: Some(e.to_string()), import_string: None },
+            Err(e) => AddonsView { inventory: None, error: Some(e.to_string()), import_string: None, status: None, synced_count },
         })
     })
     .await

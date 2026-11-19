@@ -33,6 +33,12 @@ pub struct LastSync {
     /// Incoming changes wait because the game is running.
     pub pending_apply: bool,
     pub skipped: Vec<String>,
+    /// Addons in the synced list that this machine's WowUp doesn't have.
+    pub addons_missing: usize,
+    /// Addons installed here that were uninstalled on another machine.
+    pub addons_removed_elsewhere: usize,
+    /// Addon-list entries uploaded from this machine.
+    pub addon_changes: usize,
 }
 
 /// Desktop-only settings, kept in `<data dir>/desktop.json`.

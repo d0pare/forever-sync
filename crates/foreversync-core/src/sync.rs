@@ -9,11 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
+use foreversync_addons::{default_wowup_dirs, load_inventory};
 use foreversync_git::{Oid, PushOutcome, Remote, Store, StoreError};
 use serde::Serialize;
 
 use crate::merge::{Conflict, Side, merge3};
-use crate::{Changes, FileSet, ForeverInstall, apply, layout, process, scan};
+use crate::{Changes, FileSet, ForeverInstall, addon_sync, apply, layout, process, scan};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -23,6 +24,8 @@ pub enum SyncError {
     Io(#[from] std::io::Error),
     #[error("the remote kept moving; gave up after {0} attempts")]
     TooManyRetries(u32),
+    #[error("can't read WowUp's addon list, so it can't be made the source: {0}")]
+    AddonsUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, SyncError>;
@@ -50,7 +53,12 @@ pub enum FirstSync {
 #[derive(Debug, Default, Serialize)]
 pub struct SnapshotOutcome {
     pub commit: Option<String>,
+    /// WTF/ changes recorded.
     pub changes: Changes,
+    /// Addon-list changes recorded (`addons/packages/...`).
+    pub addon_changes: Changes,
+    /// Why the WowUp list couldn't be read (the last known list was kept).
+    pub addons_error: Option<String>,
     pub skipped: Vec<scan::Skipped>,
     /// Local edits that replaced a not-yet-applied remote change.
     pub overrode_pending: Vec<String>,
@@ -81,6 +89,9 @@ pub struct SyncReport {
     pub integration: Integration,
     pub pushed: bool,
     pub apply: ApplyOutcome,
+    /// With `addons_source`: how the synced addon list changed to match
+    /// this machine (e.g. addons that came only from other machines removed).
+    pub addon_list_reset: Option<Changes>,
 }
 
 pub struct Engine<'a> {
@@ -88,11 +99,75 @@ pub struct Engine<'a> {
     pub store: &'a Store,
     pub backup_root: PathBuf,
     pub host: String,
+    /// WowUp data folders to read the addon list from (empty: don't).
+    pub wowup_dirs: Vec<PathBuf>,
+    /// Make this machine's WowUp list the synced addon list (drop entries
+    /// that came only from other machines). Off by default.
+    pub addons_source: bool,
+}
+
+/// What this machine has right now: syncable WTF/ files plus the WowUp
+/// addon list, as repo paths.
+struct Observed {
+    files: FileSet,
+    skipped: Vec<scan::Skipped>,
+    addons_error: Option<String>,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(install: &'a ForeverInstall, store: &'a Store, backup_root: &Path) -> Self {
-        Self { install, store, backup_root: backup_root.to_path_buf(), host: process::host_name() }
+        Self {
+            install,
+            store,
+            backup_root: backup_root.to_path_buf(),
+            host: process::host_name(),
+            wowup_dirs: default_wowup_dirs(),
+            addons_source: false,
+        }
+    }
+
+    /// Replaces the addon list on `main` with exactly this machine's WowUp
+    /// list. Refuses (rather than emptying the list) if WowUp can't be read.
+    fn reset_addon_list(&self) -> Result<Changes> {
+        let inv = load_inventory(&self.wowup_dirs, &self.install.flavor_dir, &self.install.addons_dir())
+            .map_err(|e| SyncError::AddonsUnavailable(e.to_string()))?;
+        let head = self.store.head_files()?;
+        let mine = addon_sync::files_from_inventory(&inv);
+        let changes = Changes::between(&addon_sync::addon_files(&head), &mine);
+        if !changes.is_empty() {
+            let mut next: FileSet =
+                head.into_iter().filter(|(p, _)| !p.starts_with(addon_sync::PACKAGES_PREFIX)).collect();
+            next.extend(mine);
+            let msg = format!(
+                "Make \"{}\"'s addon list the source\n\nForeverSync-Machine: {}\nForeverSync-Trigger: addons-source\n",
+                self.host, self.host
+            );
+            self.store.snapshot(&next, &msg)?;
+        }
+        Ok(changes)
+    }
+
+    /// Scans WTF/ and reads WowUp. If WowUp can't be read, the addon part of
+    /// `previous` is kept so nothing looks uninstalled.
+    fn observe(&self, previous: Option<&FileSet>) -> Result<Observed> {
+        let scanned = scan::scan_wtf(&self.install.wtf_dir())?;
+        let mut files = scanned.files;
+        let addons_error = if self.wowup_dirs.is_empty() {
+            files.extend(previous.map(addon_sync::addon_files).unwrap_or_default());
+            None
+        } else {
+            match load_inventory(&self.wowup_dirs, &self.install.flavor_dir, &self.install.addons_dir()) {
+                Ok(inv) => {
+                    files.extend(addon_sync::files_from_inventory(&inv));
+                    None
+                }
+                Err(e) => {
+                    files.extend(previous.map(addon_sync::addon_files).unwrap_or_default());
+                    Some(e.to_string())
+                }
+            }
+        };
+        Ok(Observed { files, skipped: scanned.skipped, addons_error })
     }
 
     /// Local-only ref holding the last observed state of this install's WTF/.
@@ -107,9 +182,9 @@ impl<'a> Engine<'a> {
 
     /// Records local WTF/ changes on top of `main`.
     pub fn snapshot(&self, trigger: &str, first: FirstSync) -> Result<SnapshotOutcome> {
-        let scanned = scan::scan_wtf(&self.install.wtf_dir())?;
         let head_files = self.store.head_files()?;
         let observed = self.store.files_at_ref(&self.disk_ref())?;
+        let scanned = self.observe(observed.as_ref())?;
 
         let mut next = head_files.clone();
         for (path, bytes) in layout::base_files() {
@@ -146,6 +221,7 @@ impl<'a> Engine<'a> {
         }
 
         let changes = Changes::between(&layout::wtf_only(&head_files), &layout::wtf_only(&next));
+        let addon_changes = Changes::between(&addon_sync::addon_files(&head_files), &addon_sync::addon_files(&next));
         let message = format!(
             "Snapshot from \"{host}\" ({trigger})\n\n\
              ForeverSync-Machine: {host}\n\
@@ -158,7 +234,14 @@ impl<'a> Engine<'a> {
         );
         let commit = self.store.snapshot(&next, &message)?.map(|id| id.to_string());
         self.store.set_files_ref(&self.disk_ref(), &scanned.files, "observed disk state")?;
-        Ok(SnapshotOutcome { commit, changes, skipped: scanned.skipped, overrode_pending })
+        Ok(SnapshotOutcome {
+            commit,
+            changes,
+            addon_changes,
+            addons_error: scanned.addons_error,
+            skipped: scanned.skipped,
+            overrode_pending,
+        })
     }
 
     /// Brings `remote_head` into `main`: fast-forward or per-file merge.
@@ -217,7 +300,7 @@ impl<'a> Engine<'a> {
             return Ok(ApplyOutcome::GameRunning);
         }
         let report = apply::execute(&self.install.wtf_dir(), &target, &plan, &self.backup_root)?;
-        let rescanned = scan::scan_wtf(&self.install.wtf_dir())?;
+        let rescanned = self.observe(observed.as_ref())?;
         self.store.set_files_ref(&self.disk_ref(), &rescanned.files, "observed disk state after apply")?;
         Ok(ApplyOutcome::Applied(report))
     }
@@ -251,7 +334,8 @@ impl<'a> Engine<'a> {
         let Some(remote) = remote else {
             let snapshot = self.snapshot(trigger, first)?;
             let apply = self.apply_head(force_apply)?;
-            return Ok(SyncReport { snapshot, integration: Integration::NoRemote, pushed: false, apply });
+            let addon_list_reset = if self.addons_source { Some(self.reset_addon_list()?) } else { None };
+            return Ok(SyncReport { snapshot, integration: Integration::NoRemote, pushed: false, apply, addon_list_reset });
         };
 
         // A machine with no history adopts the cloud's before its first
@@ -267,10 +351,20 @@ impl<'a> Engine<'a> {
         const ATTEMPTS: u32 = 3;
         let mut integration = Integration::UpToDate;
         let mut pushed = false;
+        let mut addon_list_reset: Option<Changes> = None;
         for attempt in 1..=ATTEMPTS {
             let step = self.integrate(remote_head, policy)?;
             if !matches!(step, Integration::UpToDate | Integration::LocalAhead) || attempt == 1 {
                 integration = step;
+            }
+            if self.addons_source {
+                // Re-applied after every merge, so additions that arrive while
+                // retrying are dropped too.
+                let c = self.reset_addon_list()?;
+                let acc = addon_list_reset.get_or_insert_with(Changes::default);
+                acc.added.extend(c.added);
+                acc.modified.extend(c.modified);
+                acc.deleted.extend(c.deleted);
             }
             let head = self.store.head()?;
             if head.is_none() || head == remote_head {
@@ -286,6 +380,6 @@ impl<'a> Engine<'a> {
             }
         }
         let apply = self.apply_head(force_apply)?;
-        Ok(SyncReport { snapshot, integration, pushed, apply })
+        Ok(SyncReport { snapshot, integration, pushed, apply, addon_list_reset })
     }
 }
