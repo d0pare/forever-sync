@@ -4,7 +4,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreversync_addons::{ImportPayload, Inventory, default_wowup_dirs, import_string, load_inventory};
+use foreversync_core::addon_cleanup::{self, RemovalPlan, RemovalReport};
 use foreversync_core::addon_sync::{self, AddonStatus};
+use foreversync_core::process;
 use foreversync_core::appdata::{self, RepoConfig};
 use foreversync_core::sync::FirstSync;
 use foreversync_core::{ForeverInstall, discovery};
@@ -236,4 +238,38 @@ pub async fn addons(app: AppHandle) -> CmdResult<AddonsView> {
 #[tauri::command]
 pub fn status(state: State<'_, AppState>) -> Status {
     state.status.lock().unwrap().clone()
+}
+
+fn synced_and_local(app: &AppHandle) -> CmdResult<(ForeverInstall, foreversync_core::FileSet, Inventory)> {
+    let install = discovery::discover(None).map_err(|e| e.to_string())?;
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    let synced = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir))
+        .and_then(|s| s.head_files())
+        .map_err(|e| e.to_string())?;
+    let inv = load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir()).map_err(|e| e.to_string())?;
+    Ok((install, synced, inv))
+}
+
+/// What "remove addons uninstalled on other computers" would move to trash.
+#[tauri::command]
+pub async fn addon_removal_plan(app: AppHandle) -> CmdResult<RemovalPlan> {
+    blocking(move || {
+        let (_, synced, inv) = synced_and_local(&app)?;
+        Ok(addon_cleanup::plan(&synced, &inv, None))
+    })
+    .await
+}
+
+/// Moves addons uninstalled on other computers to the AddOns trash.
+#[tauri::command]
+pub async fn remove_addons(app: AppHandle) -> CmdResult<RemovalReport> {
+    blocking(move || {
+        let (install, synced, inv) = synced_and_local(&app)?;
+        if process::forever_running(&install.flavor_dir) {
+            return Err("Quit WoW Forever first; addons can't be removed while the game is running.".into());
+        }
+        let plan = addon_cleanup::plan(&synced, &inv, None);
+        addon_cleanup::execute(&install.addons_dir(), &plan).map_err(|e| e.to_string())
+    })
+    .await
 }

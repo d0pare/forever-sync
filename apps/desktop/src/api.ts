@@ -45,6 +45,8 @@ export type AddonStatus = {
   in_sync: number;
   missing_import: string | null;
 };
+export type RemovalPlan = { packages: PackageFile[]; folders: string[]; kept_shared: string[] };
+export type RemovalReport = { moved: string[]; trash_dir: string | null };
 export type AddonsView = {
   inventory: Inventory | null;
   error: string | null;
@@ -61,6 +63,8 @@ export const api = {
   findRepo: () => invoke<RepoSearch>("find_repo"),
   chooseRepo: (fullName: string) => invoke<RepoChoice>("choose_repo", { fullName }),
   syncNow: (firstSync?: "use-cloud" | "upload-local") => invoke<LastSync | null>("sync_now", { firstSync }),
+  addonRemovalPlan: () => invoke<RemovalPlan>("addon_removal_plan"),
+  removeAddons: () => invoke<RemovalReport>("remove_addons"),
   makeAddonSource: () => invoke<LastSync | null>("sync_now", { addonsSource: true }),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   addons: () => invoke<AddonsView>("addons"),

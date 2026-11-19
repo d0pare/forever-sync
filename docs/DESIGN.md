@@ -12,7 +12,7 @@ Forever Sync supports only the Forever client (`_forever_`, product `wowf`, patc
 
 ### Goals
 1. **Sync Forever settings** (`_forever_/WTF/`) across machines: account-wide and per-character.
-2. **Sync the installed addon set through WowUp**: keep the list of WowUp-managed addons in the repo and hand it to WowUp as an import string. Forever Sync never stores, copies, downloads or deletes addon files.
+2. **Sync the installed addon set through WowUp**: keep the list of WowUp-managed addons in the repo and hand it to WowUp as an import string. Forever Sync never stores, copies or downloads addon files. Its only addon-file action: on your request, it moves addons that were uninstalled on another computer to a trash folder (§6.5), because WowUp's import can't remove addons.
 3. **Full history**: every snapshot is a git commit, and users can roll back one addon's settings or everything.
 4. **GitHub as storage**: a GitHub sign-in sets up a private repo. There is no backend of our own.
 5. **Never lose data**: never write while the Forever client is running, back up before every overwrite, and make everything recoverable.
@@ -209,7 +209,7 @@ ForeverSync-Version: 0.1.0
 
 ## 6. Addon sync
 
-**Forever Sync does no addon file handling at all.** It never stores, copies, downloads or deletes anything in `Interface/AddOns/`. WowUp stays the addon manager on every machine. Forever Sync keeps the **list** of WowUp-managed addons in the repo and turns it into a **WowUp import string**. On another machine you paste it into WowUp's *Import/Export Addons* dialog, and WowUp installs whatever is missing.
+**Forever Sync never stores, copies or downloads addon files.** The one exception is removing addons that were uninstalled on another computer, on request (§6.5). WowUp stays the addon manager on every machine. Forever Sync keeps the **list** of WowUp-managed addons in the repo and turns it into a **WowUp import string**. On another machine you paste it into WowUp's *Import/Export Addons* dialog, and WowUp installs whatever is missing.
 
 Addons that WowUp doesn't manage (hand-installed, or ones WowUp couldn't match) are **not synced**. The app lists them as "not managed by WowUp" so the user knows to add them to WowUp or install them by hand.
 
@@ -268,8 +268,18 @@ In short, the import adds missing addons. It never removes them and never downgr
   - **removed elsewhere**: installed here, gone from the list,
   - **in sync**: present in both. Version differences don't count; WowUp keeps each machine on latest.
 - **Missing addons** show as a highlighted callout with **Copy WowUp import for these** (a string for just the missing ones), and the tray says "N addons to install with WowUp". The CLI equivalent is `foreversync addons --missing`.
-- **Removed elsewhere** shows as "remove in WowUp if you don't want them here". Forever Sync never deletes addon folders.
+- **Removed elsewhere** is listed with a **Remove from this computer…** button (§6.5).
 - After WowUp installs them, the next sync records them and the status clears.
+
+---
+
+### 6.5 Removing addons uninstalled elsewhere (`foreversync-core/src/addon_cleanup.rs`)
+WowUp's import adds addons but never removes them, so Forever Sync can do the removal:
+- **Only on request:** a button with a confirmation listing the folders, or `foreversync addons --remove-uninstalled --yes` in the CLI. Nothing is removed automatically.
+- **Only** WowUp-managed addons that are installed here but gone from the synced list. Folders WowUp doesn't manage are never touched, and neither is any folder another kept or synced addon still lists (e.g. a shared library folder).
+- **Recoverable:** folders are *moved* to `_forever_/Interface/.foreversync-trash/<unix-ms>/`. It's on the same drive, so it's instant, and WoW loads only `Interface/AddOns`. Batches older than 30 days are purged when the app starts. To restore, move the folder back.
+- **Never while the game runs** (Windows may hold the files open).
+- WowUp drops its record of the addon the next time it scans. Forever Sync already ignores records whose folders are gone.
 
 ---
 

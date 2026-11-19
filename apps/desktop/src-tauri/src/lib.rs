@@ -63,6 +63,13 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
+            // Empty addon trash older than 30 days.
+            if let Ok(install) = foreversync_core::discovery::discover(None) {
+                let _ = foreversync_core::addon_cleanup::purge_trash(
+                    &install.addons_dir(),
+                    foreversync_core::addon_cleanup::TRASH_KEEP,
+                );
+            }
             worker::spawn(app.handle().clone());
             Ok(())
         })
@@ -84,6 +91,8 @@ pub fn run() {
             commands::set_autostart,
             commands::addons,
             commands::status,
+            commands::addon_removal_plan,
+            commands::remove_addons,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

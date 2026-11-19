@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use foreversync_addons::{ImportPayload, default_wowup_dirs, import_string, load_inventory};
 use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration, SnapshotOutcome};
 use foreversync_core::appdata::{self, RepoConfig};
-use foreversync_core::{Changes, ForeverInstall, addon_sync, discovery, layout, process, scan};
+use foreversync_core::{Changes, ForeverInstall, addon_cleanup, addon_sync, discovery, layout, process, scan};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, FileStore, KeychainStore, TokenStore};
 
@@ -46,6 +46,13 @@ enum Command {
         /// Print only the WowUp import string for synced addons missing here.
         #[arg(long, conflicts_with = "import_string")]
         missing: bool,
+        /// Move addons uninstalled on other computers to the AddOns trash
+        /// (shows the plan; add --yes to do it).
+        #[arg(long, conflicts_with_all = ["import_string", "missing"])]
+        remove_uninstalled: bool,
+        /// Confirm --remove-uninstalled.
+        #[arg(long, requires = "remove_uninstalled")]
+        yes: bool,
         /// WowUp data folder (default: WowUpCf, then WowUp, in the OS config dir).
         #[arg(long)]
         wowup_dir: Option<PathBuf>,
@@ -164,7 +171,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Detect => detect(&install, cli.json),
-        Command::Addons { import_string, missing, wowup_dir } => {
+        Command::Addons { remove_uninstalled: true, yes, wowup_dir, .. } => remove_uninstalled(&install, &store, wowup_dir, yes),
+        Command::Addons { import_string, missing, wowup_dir, .. } => {
             addons(&install, &store, cli.json, import_string, missing, wowup_dir)
         }
         Command::Status => {
@@ -409,6 +417,40 @@ fn addons(
             }
         }
         println!("\nWowUp import string ({} chars): run with --import-string to print it", string.len());
+    }
+    Ok(())
+}
+
+fn remove_uninstalled(install: &ForeverInstall, store: &Store, wowup_dir: Option<PathBuf>, yes: bool) -> Result<()> {
+    let dirs = wowup_dir.map(|d| vec![d]).unwrap_or_else(default_wowup_dirs);
+    let inv = load_inventory(&dirs, &install.flavor_dir, &install.addons_dir())?;
+    let plan = addon_cleanup::plan(&store.head_files()?, &inv, None);
+    if plan.packages.is_empty() {
+        println!("Nothing to remove: every addon here is in the synced list.");
+        return Ok(());
+    }
+    println!("Uninstalled on another computer ({}):", plan.packages.len());
+    for p in &plan.packages {
+        println!("  {}", p.name);
+    }
+    println!("Folders to move to {}:", install.addons_dir().with_file_name(addon_cleanup::TRASH_DIR).display());
+    for f in &plan.folders {
+        println!("  {f}");
+    }
+    for f in &plan.kept_shared {
+        println!("  (kept, still used by another addon: {f})");
+    }
+    if !yes {
+        println!("Run again with --yes to move them.");
+        return Ok(());
+    }
+    if process::forever_running(&install.flavor_dir) {
+        bail!("Quit WoW Forever first; addons can't be removed while the game is running.");
+    }
+    let r = addon_cleanup::execute(&install.addons_dir(), &plan)?;
+    println!("Moved {} folder(s).", r.moved.len());
+    if let Some(t) = r.trash_dir {
+        println!("They're in {} (emptied after 30 days); move them back to restore.", t.display());
     }
     Ok(())
 }

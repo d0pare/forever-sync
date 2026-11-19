@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, AddonsView, AppStateView, LastSync, LoginStart, RepoChoice, RepoSearch, Status } from "./api";
+import { api, AddonsView, AppStateView, LastSync, LoginStart, RemovalPlan, RepoChoice, RepoSearch, Status } from "./api";
 
 function useCopy() {
   const [copied, setCopied] = useState<string | null>(null);
@@ -367,12 +367,13 @@ function triggerLabel(t: string) {
 
 function Addons({ lastSyncAt }: { lastSyncAt: number }) {
   const [view, setView] = useState<AddonsView | null>(null);
+  const [reload, setReload] = useState(0);
   const { copied, copy } = useCopy();
   useEffect(() => {
     api.addons().then(setView).catch((e) =>
       setView({ inventory: null, error: String(e), import_string: null, status: null, synced_count: 0 }),
     );
-  }, [lastSyncAt]); // refresh after every sync
+  }, [lastSyncAt, reload]); // refresh after every sync and after removals
   const inv = view?.inventory;
   const st = view?.status;
   return (
@@ -402,10 +403,10 @@ function Addons({ lastSyncAt }: { lastSyncAt: number }) {
       {st && st.removed_elsewhere.length > 0 && (
         <div className="warn">
           <p>
-            Uninstalled on your other computer; remove in WowUp if you don’t want{" "}
-            {st.removed_elsewhere.length === 1 ? "it" : "them"} here:
+            Uninstalled on your other computer (WowUp’s import doesn’t remove addons):
           </p>
           <p className="small">{st.removed_elsewhere.map((p) => p.name).join(", ")}</p>
+          <RemoveAddons count={st.removed_elsewhere.length} onDone={() => setReload((n) => n + 1)} />
         </div>
       )}
       {st && st.missing.length === 0 && st.removed_elsewhere.length === 0 && (
@@ -442,6 +443,66 @@ function Addons({ lastSyncAt }: { lastSyncAt: number }) {
         </>
       )}
     </section>
+  );
+}
+
+function RemoveAddons({ count, onDone }: { count: number; onDone: () => void }) {
+  const [plan, setPlan] = useState<RemovalPlan | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const ask = async () => {
+    setError(null);
+    try {
+      setPlan(await api.addonRemovalPlan());
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const go = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.removeAddons();
+      setMsg(`Moved ${r.moved.length} folder${r.moved.length === 1 ? "" : "s"} to the trash${r.trash_dir ? ` (${r.trash_dir})` : ""}. Kept for 30 days; move a folder back to restore it.`);
+      setPlan(null);
+      onDone();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (msg) return <p className="small">{msg}</p>;
+  if (!plan)
+    return (
+      <>
+        <button onClick={ask}>Remove {count === 1 ? "it" : `these ${count}`} from this computer…</button>
+        {error && <p className="error">{error}</p>}
+      </>
+    );
+  return (
+    <div className="callout">
+      <p className="small">
+        These AddOns folders will be moved to a trash folder next to AddOns (WoW ignores it) and kept for 30 days:
+      </p>
+      <p className="small">
+        <code>{plan.folders.join(", ") || "none"}</code>
+      </p>
+      {plan.kept_shared.length > 0 && (
+        <p className="muted small">Kept because another addon still uses them: {plan.kept_shared.join(", ")}</p>
+      )}
+      <p className="muted small">WowUp will notice they’re gone the next time it scans. Quit WoW first.</p>
+      <div className="row">
+        <button onClick={() => setPlan(null)} disabled={busy}>
+          Cancel
+        </button>
+        <button className="primary" onClick={go} disabled={busy || plan.folders.length === 0}>
+          {busy ? "Removing…" : `Move ${plan.folders.length} folder${plan.folders.length === 1 ? "" : "s"} to trash`}
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+    </div>
   );
 }
 
