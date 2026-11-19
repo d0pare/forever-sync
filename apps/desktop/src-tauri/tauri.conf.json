@@ -30,6 +30,19 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Utility",
+    "shortDescription": "Sync WoW Forever settings across your computers",
+    "longDescription": "Keeps World of Warcraft: Forever settings (SavedVariables, keybindings, macros) the same on all your computers using a private GitHub repository you own. Not affiliated with Blizzard Entertainment.",
+    "copyright": "Not affiliated with Blizzard Entertainment.",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
