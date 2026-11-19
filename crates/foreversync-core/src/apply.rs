@@ -9,10 +9,12 @@
 //!   gone from the target, and is still byte-identical on disk to `base`.
 //!
 //! Callers must check [`crate::process::forever_running`] first.
+//! Backup folders older than [`BACKUP_KEEP`] are removed by [`purge_backups`].
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -99,11 +101,7 @@ pub fn plan(wtf_dir: &Path, target: &FileSet, base: Option<&FileSet>) -> io::Res
 /// Executes `plan`, backing up into a new folder under `backup_root`.
 pub fn execute(wtf_dir: &Path, target: &FileSet, plan: &ApplyPlan, backup_root: &Path) -> io::Result<ApplyReport> {
     let mut report = ApplyReport::default();
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let backup_dir = backup_root.join(format!("apply-{stamp}"));
+    let backup_dir = backup_root.join(format!("{BACKUP_PREFIX}{}", now_ms()));
 
     let mut backup = |repo_path: &str, path: &Path| -> io::Result<()> {
         if !path.exists() {
@@ -137,6 +135,39 @@ pub fn execute(wtf_dir: &Path, target: &FileSet, plan: &ApplyPlan, backup_root: 
         }
     }
     Ok(report)
+}
+
+/// How long [`execute`]'s backups are kept (DESIGN.md §7.5). Every version
+/// is also in the repo's history; backups cover the moment of the write.
+pub const BACKUP_KEEP: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+const BACKUP_PREFIX: &str = "apply-";
+
+fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// Deletes `apply-<ms>` backup folders older than `keep`; anything else in
+/// `backup_root` is left alone. Returns how many were removed.
+pub fn purge_backups(backup_root: &Path, keep: Duration) -> io::Result<usize> {
+    let entries = match fs::read_dir(backup_root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let now = now_ms();
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(stamp) = name.to_str().and_then(|n| n.strip_prefix(BACKUP_PREFIX)).and_then(|n| n.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        if now.saturating_sub(stamp) > keep.as_millis() && entry.file_type().is_ok_and(|t| t.is_dir()) {
+            fs::remove_dir_all(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -232,5 +263,25 @@ mod tests {
             .filter(|n| n.ends_with(".foreversync-tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn purges_only_old_apply_backups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = now_ms() - BACKUP_KEEP.as_millis() - 1000;
+        let recent = now_ms() - 1000;
+        for name in [format!("apply-{old}"), format!("apply-{recent}"), "apply-x".into(), "keep-me".into()] {
+            fs::create_dir_all(root.join(&name).join("Account")).unwrap();
+            fs::write(root.join(&name).join("Account/f.lua"), "x").unwrap();
+        }
+        fs::write(root.join(format!("apply-{}", old - 1)), "a file, not a backup").unwrap();
+
+        assert_eq!(purge_backups(root, BACKUP_KEEP).unwrap(), 1);
+        assert!(!root.join(format!("apply-{old}")).exists());
+        for name in [format!("apply-{recent}"), "apply-x".into(), "keep-me".into(), format!("apply-{}", old - 1)] {
+            assert!(root.join(&name).exists(), "{name} kept");
+        }
+        assert_eq!(purge_backups(&root.join("missing"), BACKUP_KEEP).unwrap(), 0);
     }
 }

@@ -31,6 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--background"])))
         .manage(AppState::new(data_dir))
         .setup(|app| {
@@ -87,7 +88,12 @@ pub fn run() {
                     let _ = al.enable();
                 }
             }
-            // Empty addon trash older than 30 days.
+            // Drop apply backups older than 14 days and addon trash older than 30.
+            let data_dir = app.state::<AppState>().data_dir.clone();
+            let _ = foreversync_core::apply::purge_backups(
+                &foreversync_core::appdata::backups_dir(&data_dir),
+                foreversync_core::apply::BACKUP_KEEP,
+            );
             if let Ok(install) = foreversync_core::discovery::discover(None) {
                 let _ = foreversync_core::addon_cleanup::purge_trash(
                     &install.addons_dir(),
@@ -112,6 +118,7 @@ pub fn run() {
             commands::logout,
             commands::find_repo,
             commands::choose_repo,
+            commands::first_sync_preview,
             commands::sync_now,
             commands::set_autostart,
             commands::addons,

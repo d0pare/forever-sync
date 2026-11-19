@@ -108,10 +108,10 @@ pub struct Engine<'a> {
 
 /// What this machine has right now: syncable WTF/ files plus the WowUp
 /// addon list, as repo paths.
-struct Observed {
-    files: FileSet,
-    skipped: Vec<scan::Skipped>,
-    addons_error: Option<String>,
+pub(crate) struct Observed {
+    pub(crate) files: FileSet,
+    pub(crate) skipped: Vec<scan::Skipped>,
+    pub(crate) addons_error: Option<String>,
 }
 
 impl<'a> Engine<'a> {
@@ -149,7 +149,7 @@ impl<'a> Engine<'a> {
 
     /// Scans WTF/ and reads WowUp. If WowUp can't be read, the addon part of
     /// `previous` is kept so nothing looks uninstalled.
-    fn observe(&self, previous: Option<&FileSet>) -> Result<Observed> {
+    pub(crate) fn observe(&self, previous: Option<&FileSet>) -> Result<Observed> {
         let scanned = scan::scan_wtf(&self.install.wtf_dir())?;
         let mut files = scanned.files;
         let addons_error = if self.wowup_dirs.is_empty() {
@@ -180,20 +180,25 @@ impl<'a> Engine<'a> {
         format!("refs/foreversync/disk/{h:016x}")
     }
 
-    /// Records local WTF/ changes on top of `main`.
-    pub fn snapshot(&self, trigger: &str, first: FirstSync) -> Result<SnapshotOutcome> {
-        let head_files = self.store.head_files()?;
-        let observed = self.store.files_at_ref(&self.disk_ref())?;
-        let scanned = self.observe(observed.as_ref())?;
-
+    /// What a snapshot commits: `head_files` plus this machine's changes
+    /// since `observed` (the last look at disk), or, with no earlier look,
+    /// `scanned` taken according to `first`. Also returns local edits that
+    /// replace a not-yet-applied remote change.
+    pub(crate) fn next_state(
+        &self,
+        head_files: &FileSet,
+        observed: Option<&FileSet>,
+        scanned: &FileSet,
+        first: FirstSync,
+    ) -> (FileSet, Vec<String>) {
         let mut next = head_files.clone();
         for (path, bytes) in layout::base_files() {
             next.entry(path).or_insert(bytes);
         }
         let mut overrode_pending = Vec::new();
-        match &observed {
+        match observed {
             Some(prev) => {
-                for (path, bytes) in &scanned.files {
+                for (path, bytes) in scanned {
                     if prev.get(path) == Some(bytes) {
                         continue; // unchanged on disk since last look
                     }
@@ -203,12 +208,12 @@ impl<'a> Engine<'a> {
                     }
                     next.insert(path.clone(), bytes.clone());
                 }
-                for path in prev.keys().filter(|p| !scanned.files.contains_key(*p)) {
+                for path in prev.keys().filter(|p| !scanned.contains_key(*p)) {
                     next.remove(path);
                 }
             }
             None => {
-                for (path, bytes) in &scanned.files {
+                for (path, bytes) in scanned {
                     let take = match first {
                         FirstSync::UploadLocal => true,
                         FirstSync::UseCloud => !head_files.contains_key(path),
@@ -219,6 +224,15 @@ impl<'a> Engine<'a> {
                 }
             }
         }
+        (next, overrode_pending)
+    }
+
+    /// Records local WTF/ changes on top of `main`.
+    pub fn snapshot(&self, trigger: &str, first: FirstSync) -> Result<SnapshotOutcome> {
+        let head_files = self.store.head_files()?;
+        let observed = self.store.files_at_ref(&self.disk_ref())?;
+        let scanned = self.observe(observed.as_ref())?;
+        let (next, overrode_pending) = self.next_state(&head_files, observed.as_ref(), &scanned.files, first);
 
         let changes = Changes::between(&layout::wtf_only(&head_files), &layout::wtf_only(&next));
         let addon_changes = Changes::between(&addon_sync::addon_files(&head_files), &addon_sync::addon_files(&next));

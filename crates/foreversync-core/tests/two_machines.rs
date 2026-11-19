@@ -348,3 +348,72 @@ fn history_shows_conflicts_and_restores_the_other_version() {
     a.sync(&remote, nw, FirstSync::UseCloud);
     assert_eq!(a.read(&plater).unwrap(), lua("PlaterDB", "1"));
 }
+
+#[test]
+fn first_sync_preview_matches_what_sync_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    git2::Repository::init_bare(&origin).unwrap();
+    let remote = Remote { url: origin.display().to_string(), token: None };
+    let a = Machine::new(tmp.path(), "a");
+    let b = Machine::new(tmp.path(), "b");
+    let nw = ConflictPolicy::NewestWins;
+
+    a.write(&format!("{SV}/Plater.lua"), &lua("PlaterDB", "a1"));
+    a.write(&format!("{SV}/Same.lua"), &lua("Same", "x"));
+    a.write("Account/ACCT/93/Alpha-One/AddOns.txt", "Plater: enabled\n");
+    a.sync(&remote, nw, FirstSync::UseCloud);
+
+    b.write(&format!("{SV}/Plater.lua"), &lua("PlaterDB", "b-stale"));
+    b.write(&format!("{SV}/Same.lua"), &lua("Same", "x"));
+    b.write(&format!("{SV}/OnlyB.lua"), &lua("OnlyB", "b"));
+
+    let preview = |m: &Machine| {
+        let install = discovery::open(&m.root).unwrap();
+        let store = Store::open_or_init(&m.data.join("repo.git")).unwrap();
+        let mut engine = Engine::new(&install, &store, &m.data.join("backups"));
+        engine.wowup_dirs = m.wowup_dirs();
+        engine.preview_first_sync(Some(&remote)).unwrap()
+    };
+    let paths = |files: &[foreversync_core::history::SettingsFile]| {
+        let mut v: Vec<String> =
+            files.iter().map(|f| format!("{:?} {}", f.status, f.path.trim_start_matches("wtf/"))).collect();
+        v.sort();
+        v
+    };
+
+    let p = preview(&b);
+    assert!(p.cloud_has_data && !p.synced_before);
+    assert_eq!(p.same, 1);
+    assert_eq!(
+        paths(&p.use_cloud.this_computer),
+        ["Added Account/ACCT/93/Alpha-One/AddOns.txt".to_owned(), format!("Modified {SV}/Plater.lua")]
+    );
+    assert_eq!(paths(&p.use_cloud.cloud), [format!("Added {SV}/OnlyB.lua")]);
+    assert_eq!(paths(&p.upload_local.this_computer), ["Added Account/ACCT/93/Alpha-One/AddOns.txt"]);
+    assert_eq!(paths(&p.upload_local.cloud), [format!("Added {SV}/OnlyB.lua"), format!("Modified {SV}/Plater.lua")]);
+
+    // Nothing changed: no local history, B's file untouched.
+    assert!(Store::open_or_init(&b.data.join("repo.git")).unwrap().head().unwrap().is_none());
+    assert_eq!(b.read(&format!("{SV}/Plater.lua")).unwrap(), lua("PlaterDB", "b-stale"));
+
+    // The real sync does what the preview said.
+    let r = b.sync(&remote, nw, FirstSync::UseCloud);
+    let ApplyOutcome::Applied(rep) = &r.apply else { panic!("{:?}", r.apply) };
+    assert_eq!((rep.written, rep.deleted), (2, 0));
+    assert_eq!(r.snapshot.changes.added, [format!("wtf/{SV}/OnlyB.lua")]);
+    assert!(preview(&b).synced_before);
+
+    // A brand-new cloud: everything here would be uploaded, nothing written.
+    let origin2 = tmp.path().join("empty.git");
+    git2::Repository::init_bare(&origin2).unwrap();
+    let c = Machine::new(tmp.path(), "c");
+    c.write(&format!("{SV}/Plater.lua"), &lua("PlaterDB", "c"));
+    let install = discovery::open(&c.root).unwrap();
+    let store = Store::open_or_init(&c.data.join("repo.git")).unwrap();
+    let engine = Engine::new(&install, &store, &c.data.join("backups"));
+    let p = engine.preview_first_sync(Some(&Remote { url: origin2.display().to_string(), token: None })).unwrap();
+    assert!(!p.cloud_has_data);
+    assert!(p.use_cloud.this_computer.is_empty());
+    assert_eq!(paths(&p.use_cloud.cloud), [format!("Added {SV}/Plater.lua")]);
+}

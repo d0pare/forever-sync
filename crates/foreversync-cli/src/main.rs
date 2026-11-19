@@ -85,6 +85,9 @@ enum Command {
         #[arg(long)]
         addons_source: bool,
     },
+    /// Show what this machine's first sync would change for each choice
+    /// (fetches; commits and writes nothing).
+    Preview,
     /// Show local WTF/ changes not yet recorded in a snapshot.
     Status,
     /// Record local WTF/ changes as a new commit (local only).
@@ -191,8 +194,9 @@ fn main() -> Result<()> {
         Command::Status => {
             let scanned = scan::scan_wtf(&install.wtf_dir())?;
             report_skips(&scanned.skipped);
+            // The observed state also holds the addon list; compare settings only.
             let reference = match store.files_at_ref(&engine.disk_ref())? {
-                Some(observed) => observed,
+                Some(observed) => layout::wtf_only(&observed),
                 None => layout::wtf_only(&store.head_files()?),
             };
             let changes = Changes::between(&reference, &scanned.files);
@@ -240,15 +244,37 @@ fn main() -> Result<()> {
             print_apply(&applied);
             Ok(())
         }
-        Command::Sync { first_sync, policy, force, addons_source } => {
-            let cfg = appdata::load_config(&data_dir)?.context("no repo configured; run `foreversync setup` first")?;
-            let token = gh::valid_access_token(tokens.as_ref())?;
-            // Privacy guard (DESIGN.md §8.3): never push to a public repo.
-            let info = gh::Client::new(token.clone()).repo(&cfg.repo)?;
-            if !info.private {
-                bail!("{} is public. Forever Sync only syncs to private repos; make it private on GitHub.", cfg.repo);
+        Command::Preview => {
+            let (_, remote) = connect(&data_dir, tokens.as_ref())?;
+            let p = engine.preview_first_sync(Some(&remote))?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&p)?);
+                return Ok(());
             }
-            let remote = Remote { url: cfg.clone_url.clone(), token: Some(token) };
+            if p.synced_before {
+                println!("This install has synced before; the first-sync choice no longer applies.");
+            }
+            if !p.cloud_has_data {
+                println!("The cloud has no Forever Sync data yet: {} file(s) would be uploaded.", p.use_cloud.cloud.len());
+                return Ok(());
+            }
+            println!("{} file(s) already match.", p.same);
+            for (name, e) in [("use-cloud", &p.use_cloud), ("upload-local", &p.upload_local)] {
+                println!("\n--first-sync {name}:");
+                for (side, files) in [("this computer", &e.this_computer), ("cloud", &e.cloud)] {
+                    println!("  {side}: {} file(s)", files.len());
+                    for f in files.iter() {
+                        println!("    {:?} {}", f.status, f.path);
+                    }
+                }
+            }
+            if let Some(n) = p.addons_missing.filter(|n| *n > 0) {
+                println!("\n{n} addon(s) in the cloud list aren't installed here.");
+            }
+            Ok(())
+        }
+        Command::Sync { first_sync, policy, force, addons_source } => {
+            let (cfg, remote) = connect(&data_dir, tokens.as_ref())?;
             let first = match first_sync {
                 FirstSyncArg::UseCloud => FirstSync::UseCloud,
                 FirstSyncArg::UploadLocal => FirstSync::UploadLocal,
@@ -345,6 +371,19 @@ fn main() -> Result<()> {
             unreachable!("handled above")
         }
     }
+}
+
+/// The configured repo and an authenticated remote for it, after the privacy
+/// guard (DESIGN.md §8.3): never sync with a public repo.
+fn connect(data_dir: &std::path::Path, tokens: &dyn TokenStore) -> Result<(RepoConfig, Remote)> {
+    let cfg = appdata::load_config(data_dir)?.context("no repo configured; run `foreversync setup` first")?;
+    let token = gh::valid_access_token(tokens)?;
+    let info = gh::Client::new(token.clone()).repo(&cfg.repo)?;
+    if !info.private {
+        bail!("{} is public. Forever Sync only syncs to private repos; make it private on GitHub.", cfg.repo);
+    }
+    let remote = Remote { url: cfg.clone_url.clone(), token: Some(token) };
+    Ok((cfg, remote))
 }
 
 fn login(tokens: &dyn TokenStore) -> Result<()> {

@@ -2,12 +2,13 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration};
 use foreversync_addons::{default_wowup_dirs, load_inventory};
-use foreversync_core::{addon_sync, appdata, discovery};
+use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration};
+use foreversync_core::{ForeverInstall, addon_sync, appdata, apply, discovery};
 use foreversync_git::{Remote, Store};
 use foreversync_github::{self as gh, KeychainStore};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::state::{AppState, LastSync, Status};
 
@@ -20,6 +21,10 @@ pub fn run_sync(app: &AppHandle, trigger: &str, first: FirstSync, addons_source:
     update_status(app, |s| s.syncing = true);
 
     let result = sync_inner(&state, trigger, first, addons_source);
+    if let Ok(last) = &result {
+        notify_conflicts(app, &last.conflicts);
+        let _ = apply::purge_backups(&appdata::backups_dir(&state.data_dir), apply::BACKUP_KEEP);
+    }
     update_status(app, |s| {
         s.syncing = false;
         match &result {
@@ -33,7 +38,15 @@ pub fn run_sync(app: &AppHandle, trigger: &str, first: FirstSync, addons_source:
     result.map(Some)
 }
 
-fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: bool) -> Result<LastSync, String> {
+/// Everything a cycle needs: the install, the local store and the remote,
+/// after the privacy check (DESIGN.md §8.3).
+pub struct Context {
+    pub install: ForeverInstall,
+    pub store: Store,
+    pub remote: Remote,
+}
+
+pub fn open_context(state: &AppState) -> Result<Context, String> {
     let cfg = appdata::load_config(&state.data_dir)
         .map_err(|e| e.to_string())?
         .ok_or("Choose a GitHub repo first.")?;
@@ -42,7 +55,7 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: 
         e => e.to_string(),
     })?;
 
-    // Privacy guard (DESIGN.md §8.3): never push to a public repo.
+    // Never push to a public repo.
     let fresh = matches!(&*state.privacy_checked.lock().unwrap(), Some((r, t)) if *r == cfg.repo && t.elapsed() < PRIVACY_RECHECK);
     if !fresh {
         let info = gh::Client::new(token.clone()).repo(&cfg.repo).map_err(|e| e.to_string())?;
@@ -54,9 +67,13 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: 
 
     let install = discovery::discover(None).map_err(|e| e.to_string())?;
     let store = Store::open_or_init(&appdata::repo_dir(&state.data_dir)).map_err(|e| e.to_string())?;
+    Ok(Context { install, store, remote: Remote { url: cfg.clone_url, token: Some(token) } })
+}
+
+fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: bool) -> Result<LastSync, String> {
+    let Context { install, store, remote } = open_context(state)?;
     let mut engine = Engine::new(&install, &store, &appdata::backups_dir(&state.data_dir));
     engine.addons_source = addons_source;
-    let remote = Remote { url: cfg.clone_url, token: Some(token) };
     let report = engine
         .sync(Some(&remote), ConflictPolicy::NewestWins, first, trigger, false)
         .map_err(|e| e.to_string())?;
@@ -93,6 +110,24 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: 
         addons_removed_elsewhere: addons.as_ref().map_or(0, |a| a.removed_elsewhere.len()),
         addon_changes: addon_changes.added.len() + addon_changes.modified.len() + addon_changes.deleted.len(),
     })
+}
+
+/// Tells the user when "newest wins" picked a version of a settings file
+/// that was changed on two computers (DESIGN.md §7.3).
+fn notify_conflicts(app: &AppHandle, conflicts: &[String]) {
+    let Some(first) = conflicts.first() else { return };
+    let name = first.rsplit('/').next().unwrap_or(first);
+    let more = match conflicts.len() - 1 {
+        0 => String::new(),
+        1 => " and 1 other file".to_owned(),
+        n => format!(" and {n} other files"),
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title("Settings changed on two computers")
+        .body(format!("Kept the newer version of {name}{more}. The other version is in History."))
+        .show();
 }
 
 /// Mutates the shared status, then tells the UI and refreshes the tray text.

@@ -186,7 +186,7 @@ function Details({ id, onRestored }: { id: string; onRestored: () => void }) {
   );
 }
 
-function where(f: SettingsFile) {
+export function where(f: SettingsFile) {
   const who = f.character ? `${f.character} (realm ${f.realm})` : f.account ? `account ${f.account}` : "all accounts";
   return `${who} · ${f.file}`;
 }

@@ -87,6 +87,15 @@ export type HistoryDetails = {
   settings: SettingsFile[];
   addons: { name: string; status: ChangeStatus; version: string | null }[];
 };
+export type Effect = { this_computer: SettingsFile[]; cloud: SettingsFile[] };
+export type FirstSyncPreview = {
+  cloud_has_data: boolean;
+  synced_before: boolean;
+  use_cloud: Effect;
+  upload_local: Effect;
+  same: number;
+  addons_missing: number | null;
+};
 export type RestoreScope =
   | { kind: "all" }
   | { kind: "addon"; addon: string }
@@ -111,6 +120,7 @@ export const api = {
   logout: () => invoke<void>("logout"),
   findRepo: () => invoke<RepoSearch>("find_repo"),
   chooseRepo: (fullName: string) => invoke<RepoChoice>("choose_repo", { fullName }),
+  firstSyncPreview: () => invoke<FirstSyncPreview>("first_sync_preview"),
   syncNow: (firstSync?: "use-cloud" | "upload-local") => invoke<LastSync | null>("sync_now", { firstSync }),
   addonRemovalPlan: () => invoke<RemovalPlan>("addon_removal_plan"),
   removeAddons: () => invoke<RemovalReport>("remove_addons"),

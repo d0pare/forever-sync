@@ -29,6 +29,7 @@ fs detect                                       # find the Forever install (read
 fs addons [--import-string]                     # WowUp addon list / import string
 fs login                                        # GitHub device-code sign-in (tokens go to the OS keychain)
 fs setup [--repo owner/name]                    # pick the private data repo
+fs preview                                    # what a first sync would change, per choice (writes nothing)
 fs sync [--first-sync use-cloud|upload-local] [--policy newest|local|remote]
 fs status | snapshot | log | apply
 fs history | show <rev>                       # readable history: machine, trigger, changes, conflicts

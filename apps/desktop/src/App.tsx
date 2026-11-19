@@ -5,11 +5,14 @@ import {
   api,
   AddonsView,
   AppStateView,
+  Effect,
+  FirstSyncPreview,
   LastSync,
   LoginStart,
   RemovalPlan,
   RepoChoice,
   RepoSearch,
+  SettingsFile,
   Status,
   UpdateInfo,
 } from "./api";
@@ -23,7 +26,7 @@ function useCopy() {
   };
   return { copied, copy };
 }
-import { History } from "./History";
+import { History, where } from "./History";
 import "./App.css";
 
 export default function App() {
@@ -185,17 +188,25 @@ function ChooseRepo({ onDone }: { onDone: () => void }) {
 }
 
 function FirstSync({ state, onDone }: { state: AppStateView; onDone: () => void }) {
-  const [initialized, setInitialized] = useState<boolean | null>(null);
+  const [preview, setPreview] = useState<FirstSyncPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [choice, setChoice] = useState<"use-cloud" | "upload-local">("use-cloud");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!state.install) return;
+    setPreview(null);
+    setPreviewError(null);
     api
-      .findRepo()
-      .then((s) => setInitialized(s.found && s.found.full_name === state.repo?.repo ? s.found.initialized : true))
-      .catch(() => setInitialized(true));
-  }, [state.repo?.repo]);
+      .firstSyncPreview()
+      .then(setPreview)
+      .catch((e) => setPreviewError(String(e)));
+  }, [state.repo?.repo, state.install?.flavor_dir]);
+
+  // Without a preview, assume the cloud has data so the choice is offered.
+  const initialized = preview ? preview.cloud_has_data : previewError ? true : null;
+  const effect = preview && (choice === "use-cloud" ? preview.use_cloud : preview.upload_local);
 
   const go = async () => {
     setError(null);
@@ -221,32 +232,54 @@ function FirstSync({ state, onDone }: { state: AppStateView; onDone: () => void 
       ) : (
         <p className="error">{state.install_error}</p>
       )}
-      {initialized === null && <p className="muted">Checking {state.repo?.repo}…</p>}
+      {state.install && initialized === null && <p className="muted">Comparing this computer with {state.repo?.repo}…</p>}
+      {previewError && <p className="muted small">Couldn’t compare with the cloud first: {previewError}</p>}
       {initialized === false && (
         <p>
-          Your settings will be uploaded to <strong>{state.repo?.repo}</strong>. Nothing in your game folder changes.
+          {preview ? plural(preview.use_cloud.cloud.length, "settings file") : "Your settings"} from this computer will be
+          uploaded to <strong>{state.repo?.repo}</strong>. Nothing in your game folder changes.
         </p>
       )}
       {initialized && (
-        <div className="choices">
-          <label className={choice === "use-cloud" ? "choice selected" : "choice"}>
-            <input type="radio" checked={choice === "use-cloud"} onChange={() => setChoice("use-cloud")} />
-            <div>
-              <strong>Use the settings from my other computer</strong> <span className="badge">Recommended</span>
-              <p className="muted">
-                Where both have a file, the cloud version wins. Files only on this computer are kept. Every replaced
-                file is backed up first.
-              </p>
-            </div>
-          </label>
-          <label className={choice === "upload-local" ? "choice selected" : "choice"}>
-            <input type="radio" checked={choice === "upload-local"} onChange={() => setChoice("upload-local")} />
-            <div>
-              <strong>Use this computer’s settings</strong>
-              <p className="muted">This computer’s files win and are sent to your other computers.</p>
-            </div>
-          </label>
-        </div>
+        <>
+          <div className="choices">
+            <label className={choice === "use-cloud" ? "choice selected" : "choice"}>
+              <input type="radio" checked={choice === "use-cloud"} onChange={() => setChoice("use-cloud")} />
+              <div>
+                <strong>Use the settings from my other computer</strong> <span className="badge">Recommended</span>
+                <p className="muted">
+                  Where both have a file, the cloud version wins. Files only on this computer are kept. Every replaced
+                  file is backed up first.
+                </p>
+                {preview && <EffectSummary effect={preview.use_cloud} />}
+              </div>
+            </label>
+            <label className={choice === "upload-local" ? "choice selected" : "choice"}>
+              <input type="radio" checked={choice === "upload-local"} onChange={() => setChoice("upload-local")} />
+              <div>
+                <strong>Use this computer’s settings</strong>
+                <p className="muted">This computer’s files win and are sent to your other computers.</p>
+                {preview && <EffectSummary effect={preview.upload_local} />}
+              </div>
+            </label>
+          </div>
+          {preview && preview.same > 0 && (
+            <p className="muted small">{plural(preview.same, "file")} already match and won’t change.</p>
+          )}
+          {effect && (effect.this_computer.length > 0 || effect.cloud.length > 0) && (
+            <details className="preview">
+              <summary>Show the files</summary>
+              <PreviewFiles title="On this computer" files={effect.this_computer} side="here" />
+              <PreviewFiles title="Sent to your other computers" files={effect.cloud} side="cloud" />
+            </details>
+          )}
+          {preview && (preview.addons_missing ?? 0) > 0 && (
+            <p className="small">
+              {plural(preview.addons_missing!, "addon")} from your other computer {preview.addons_missing === 1 ? "isn’t" : "aren’t"}{" "}
+              installed here. After syncing you’ll get a WowUp import string for {preview.addons_missing === 1 ? "it" : "them"}.
+            </p>
+          )}
+        </>
       )}
       {state.status.game_running && (
         <p className="warn">WoW Forever is running. Settings are uploaded now; incoming ones are applied after you quit.</p>
@@ -256,6 +289,46 @@ function FirstSync({ state, onDone }: { state: AppStateView; onDone: () => void 
       </button>
       {error && <p className="error">{error}</p>}
     </section>
+  );
+}
+
+function plural(n: number, w: string) {
+  return `${n} ${w}${n === 1 ? "" : "s"}`;
+}
+
+/** "On this computer: 3 replaced, 2 new · Sent: 1 new" */
+function EffectSummary({ effect }: { effect: Effect }) {
+  const count = (files: SettingsFile[], words: Record<SettingsFile["status"], string>) => {
+    const parts = (["modified", "added", "deleted"] as const)
+      .map((st) => [files.filter((f) => f.status === st).length, words[st]] as const)
+      .filter(([n]) => n > 0)
+      .map(([n, w]) => `${n} ${w}`);
+    return parts.length ? parts.join(", ") : "no changes";
+  };
+  return (
+    <p className="small effect">
+      This computer: {count(effect.this_computer, { modified: "replaced", added: "new", deleted: "removed" })}
+      <br />
+      Other computers: {count(effect.cloud, { modified: "replaced", added: "new", deleted: "removed" })}
+    </p>
+  );
+}
+
+function PreviewFiles({ title, files, side }: { title: string; files: SettingsFile[]; side: "here" | "cloud" }) {
+  if (!files.length) return null;
+  const label = { modified: "replace", added: "new", deleted: "remove" } as const;
+  return (
+    <div className="group">
+      <strong>{title}</strong>
+      <ul className="files">
+        {files.map((f) => (
+          <li key={f.path} title={f.path.replace(/^wtf\//, "")}>
+            <span className={`st st-${f.status}`}>{label[f.status]}</span> {where(f)}
+            {side === "here" && f.status === "modified" && <span className="muted">(backed up first)</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

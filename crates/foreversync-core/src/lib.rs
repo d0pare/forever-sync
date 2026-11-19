@@ -11,6 +11,7 @@ pub mod history;
 pub mod layout;
 pub mod lua;
 pub mod merge;
+pub mod preview;
 pub mod process;
 pub mod rules;
 pub mod scan;

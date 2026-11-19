@@ -325,17 +325,17 @@ The unit is a **file** under `wtf/` and a **package** (manifest entry) in the ad
 | deleted | unchanged | delete (only for paths Forever Sync tracked) |
 | deleted | changed | keep the changed version |
 
-Conflict policy: **newest snapshot wins, with a notification** (default; the loser is one click away in history), or always ask, or prefer this machine, or prefer the remote. A missing character or account folder is **never** read as a deletion.
+Conflict policy: **newest snapshot wins, with a notification** (an OS notification names the file and points to History) (default; the loser is one click away in history), or always ask, or prefer this machine, or prefer the remote. A missing character or account folder is **never** read as a deletion.
 
 ### 7.4 Later: Lua-aware merge
 Parse both sides into tables and merge by key path. Opt in per addon. Works well for AceDB-style `profiles` / `profileKeys` data.
 
 ### 7.5 Safety
-- The local state is always committed (step 2) before anything is applied. Overwritten files are also copied to `backups/<timestamp>/` and kept for 14 days.
+- The local state is always committed (step 2) before anything is applied. Overwritten files are also copied to `backups/apply-<ms>/` and kept for 14 days (purged at startup and after each sync; `apply::purge_backups`).
 - Atomic writes: write a temp file, fsync, then rename.
 - A `.lua` file that fails to parse is neither committed nor applied; it is flagged in the UI instead.
 - A repo lock plus the Tauri single-instance plugin.
-- First apply on a new machine always shows a preview.
+- First apply on a new machine always shows a preview: onboarding lists, for each first-sync choice, which files would change on this computer and which would go to the cloud (`preview.rs`, the same steps as a sync without committing or writing; CLI `fs preview`).
 
 ---
 
@@ -429,7 +429,7 @@ Other risks:
 | M2 ✅ (2026-11-18) | Remote: device flow, token refresh + Keychain, repo setup + privacy guard, fetch/merge/push, conflict policy, restore | Two CLI machines synced through a real private GitHub repo: first sync, edits, a conflict (newest wins, recorded in the merge commit), deletion, restore; token refresh and Keychain storage verified; integration tests cover the same cases plus unapplied remote changes |
 | M3 🚧 (2026-11-18) | Desktop: Tauri shell, onboarding (GitHub sign-in → repo → first-sync choice), dashboard (status, sync now, last result, conflicts, skipped files), addons + WowUp import, tray (status, Sync now, Open, Quit), close-to-tray, single instance, start at login, background worker (sync 3 s after the game exits + every 10 min) | **Done:** all of the above builds and launches on macOS. **Left:** dogfood on two machines; Windows build check; a file watcher for `/reload` while playing (the 10-minute sync covers it for now) |
 | M4 ✅ (2026-11-18) | Addon list through the repo: one file per WowUp addon, merged per addon, missing / removed-elsewhere status, import string for missing addons in the app, tray and CLI | Two-machine test: lists combine, missing addons reported, install clears them, uninstall propagates as "removed elsewhere", unreadable WowUp never drops addons |
-| M5 🚧 | History/restore UI, conflicts UI, signing, auto-update | **Done (2026-11-18/19):** CI on macOS and Windows; tag-triggered signed releases; in-app updater; app and tray icons; History tab (snapshots with machine, trigger and changes; restore everything, one addon's settings or one file; "use the other version" for conflicts; restores are new commits and sync right away). **Left:** Apple notarization and Windows Authenticode |
+| M5 🚧 | History/restore UI, conflicts UI, signing, auto-update | **Done (2026-11-18/19):** CI on macOS and Windows; tag-triggered signed releases; in-app updater; app and tray icons; History tab (snapshots with machine, trigger and changes; restore everything, one addon's settings or one file; "use the other version" for conflicts; restores are new commits and sync right away). Also: first-sync preview, conflict notifications, 14-day backup cleanup. **Left:** Apple notarization and Windows Authenticode |
 
 ---
 

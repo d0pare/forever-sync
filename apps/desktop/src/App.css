@@ -98,3 +98,7 @@ ul.files li { padding: 2px 0; display: flex; gap: 6px; align-items: baseline; fl
 .confirm { border: 1px solid var(--accent); border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
 .confirm button.primary { margin-top: 0; }
 @media (max-width: 560px) { .details { padding-left: 8px; } button.entry { grid-template-columns: 1fr; } button.entry .when { grid-row: auto; } }
+.effect { margin-top: 6px !important; }
+details.preview { margin: 4px 0 8px; }
+details.preview summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+details.preview ul.files { max-height: 220px; overflow-y: auto; }

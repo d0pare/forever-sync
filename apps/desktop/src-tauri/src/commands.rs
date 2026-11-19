@@ -170,6 +170,20 @@ pub async fn choose_repo(app: AppHandle, full_name: String) -> CmdResult<RepoCho
     .await
 }
 
+/// What each first-sync choice would change, before choosing (fetches, but
+/// commits and writes nothing).
+#[tauri::command]
+pub async fn first_sync_preview(app: AppHandle) -> CmdResult<foreversync_core::preview::FirstSyncPreview> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+        let ctx = crate::syncer::open_context(&state)?;
+        let engine = foreversync_core::sync::Engine::new(&ctx.install, &ctx.store, &appdata::backups_dir(&state.data_dir));
+        engine.preview_first_sync(Some(&ctx.remote)).map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Runs a sync now. `first_sync` ("use-cloud" | "upload-local") only matters
 /// on this machine's first sync; the first successful one completes onboarding.
 #[tauri::command]
