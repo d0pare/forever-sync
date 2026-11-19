@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, AddonsView, AppStateView, LastSync, LoginStart, RemovalPlan, RepoChoice, RepoSearch, Status } from "./api";
+import {
+  api,
+  AddonsView,
+  AppStateView,
+  LastSync,
+  LoginStart,
+  RemovalPlan,
+  RepoChoice,
+  RepoSearch,
+  Status,
+  UpdateInfo,
+} from "./api";
 
 function useCopy() {
   const [copied, setCopied] = useState<string | null>(null);
@@ -25,8 +36,10 @@ export default function App() {
   useEffect(() => {
     refresh();
     const un = listen<Status>("status", (e) => setState((s) => (s ? { ...s, status: e.payload } : s)));
+    const un2 = listen<UpdateInfo | null>("update", (e) => setState((s) => (s ? { ...s, update: e.payload } : s)));
     return () => {
       un.then((f) => f());
+      un2.then((f) => f());
     };
   }, [refresh]);
 
@@ -277,6 +290,7 @@ function Dashboard({ state, onChange }: { state: AppStateView; onChange: () => v
 
   return (
     <>
+      {state.update && <UpdateBanner update={state.update} />}
       <section>
         <div className="row">
           <StatusPill status={s} />
@@ -294,6 +308,35 @@ function Dashboard({ state, onChange }: { state: AppStateView; onChange: () => v
       <Addons lastSyncAt={s.last_sync?.at ?? 0} />
       <Settings state={state} onChange={onChange} />
     </>
+  );
+}
+
+function UpdateBanner({ update }: { update: UpdateInfo }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.installUpdate(); // restarts the app on success
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="callout">
+      <div className="row">
+        <strong>
+          Forever Sync {update.version} is available <span className="muted">(you have {update.current})</span>
+        </strong>
+        <button className="primary" onClick={install} disabled={busy}>
+          {busy ? "Updating…" : "Install and restart"}
+        </button>
+      </div>
+      {update.notes && <p className="muted small pre">{update.notes}</p>}
+      {error && <p className="error">{error}</p>}
+    </section>
   );
 }
 
@@ -506,6 +549,28 @@ function RemoveAddons({ count, onDone }: { count: number; onDone: () => void }) 
   );
 }
 
+function VersionLine({ version }: { version: string }) {
+  const [msg, setMsg] = useState<string | null>(null);
+  const check = async () => {
+    setMsg("Checking…");
+    try {
+      const u = await api.checkUpdate();
+      setMsg(u ? `Version ${u.version} is available (see the banner above).` : "You have the latest version.");
+    } catch (e) {
+      setMsg(`Couldn't check for updates: ${e}`);
+    }
+  };
+  return (
+    <p className="muted small">
+      Forever Sync {version} ·{" "}
+      <button className="link" onClick={check}>
+        Check for updates
+      </button>
+      {msg && <> · {msg}</>}
+    </p>
+  );
+}
+
 function MakeAddonSource({ count }: { count: number }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -582,6 +647,7 @@ function Settings({ state, onChange }: { state: AppStateView; onChange: () => vo
         </button>
       </p>
       <p className="muted small">Backups and local history: {state.data_dir}</p>
+      <VersionLine version={state.version} />
     </section>
   );
 }

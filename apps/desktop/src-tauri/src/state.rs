@@ -76,6 +76,8 @@ pub struct AppState {
     /// Repo whose privacy was last confirmed, and when (re-checked hourly).
     pub privacy_checked: Mutex<Option<(String, Instant)>>,
     pub tray_status: Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>,
+    /// A newer release, once the updater has seen one.
+    pub update: Mutex<Option<crate::updates::UpdateInfo>>,
 }
 
 impl AppState {
@@ -88,6 +90,7 @@ impl AppState {
             user: Mutex::new(None),
             privacy_checked: Mutex::new(None),
             tray_status: Mutex::new(None),
+            update: Mutex::new(None),
         }
     }
 }

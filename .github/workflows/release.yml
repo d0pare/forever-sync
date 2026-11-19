@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag like v0.2.0 (scripts/release.sh does this) to build signed
+# installers and update archives and publish them as a GitHub Release.
+# The app's updater reads latest.json from the newest release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest      # Apple silicon
+            args: --bundles app,dmg --config src-tauri/tauri.release.conf.json
+          - os: windows-latest
+            args: --bundles nsis --config src-tauri/tauri.release.conf.json
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/desktop/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: Forever Sync ${{ github.ref_name }}
+          releaseBody: |
+            Install: macOS — open the .dmg and drag Forever Sync to Applications (first launch: right-click → Open, or System Settings → Privacy & Security → Open Anyway; the app isn't notarized). Windows — run the *_x64-setup.exe (per user, no admin; SmartScreen: More info → Run anyway).
+            Already installed? The app updates itself: Settings → Check for updates.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

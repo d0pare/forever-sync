@@ -49,3 +49,11 @@ pnpm bundle:win   # Windows → target/release/bundle/nsis/Forever Sync_<ver>_x6
 - **macOS:** drag `Forever Sync.app` to `/Applications` (or open the `.dmg`). The app is ad-hoc signed, which is enough on the Mac that built it. Another Mac blocks a downloaded copy until it is signed with an Apple Developer ID and notarized (DESIGN.md §11, S6). Until then, right-click → Open, or build on that Mac.
 - **Windows:** run the setup `.exe`. Unsigned installers trigger SmartScreen when downloaded ("More info" → "Run anyway"). Builds made on the same PC don't.
 - OpenSSL (used by libgit2 for HTTPS on macOS) is compiled in, so the app doesn't depend on Homebrew.
+
+## Releases and auto-update
+
+- **CI** (`.github/workflows/ci.yml`) runs the tests on macOS and Windows for every push and PR.
+- **Releasing:** `scripts/release.sh 0.2.0` bumps the version, makes a signed commit and tag, and pushes. `.github/workflows/release.yml` then builds the macOS `.dmg` and app update archive plus the Windows installer, signs the update files, and publishes a GitHub Release with `latest.json`.
+- **Updating:** installed apps check `releases/latest/download/latest.json` at startup and every 6 hours, and show an "Install and restart" banner. Settings → *Check for updates* checks right away. Updates are verified against the public key in `tauri.conf.json`.
+- **Update signing key:** `~/.tauri/forever-sync.key` (+ `.password`) on the maintainer's Mac, mirrored in the repo secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. **Back it up.** Without it, installed apps can't be updated; they would need a manual reinstall with a new key.
+- Local `pnpm bundle:mac` / `bundle:win` builds don't create update archives, so they need no key. The release workflow turns them on with `--config src-tauri/tauri.release.conf.json`.

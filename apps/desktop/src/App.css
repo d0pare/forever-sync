@@ -75,3 +75,5 @@ button.link { border: none; background: none; padding: 0; color: var(--accent); 
 .callout { border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .callout button.primary { margin-top: 0; }
 .ok-text { color: var(--ok); }
+.pre { white-space: pre-wrap; }
+section.callout { border-color: var(--accent); }

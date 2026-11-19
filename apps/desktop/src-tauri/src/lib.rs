@@ -1,6 +1,7 @@
 mod commands;
 mod state;
 mod syncer;
+mod updates;
 mod worker;
 
 use foreversync_core::appdata;
@@ -29,6 +30,7 @@ pub fn run() {
         // Must be first: a second launch just focuses the running app.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--background"])))
         .manage(AppState::new(data_dir))
         .setup(|app| {
@@ -63,6 +65,15 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
+            // Start-at-login stores the app's path when enabled; refresh it so
+            // moving or updating the app keeps the login item pointing here.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let al = app.autolaunch();
+                if al.is_enabled().unwrap_or(false) {
+                    let _ = al.enable();
+                }
+            }
             // Empty addon trash older than 30 days.
             if let Ok(install) = foreversync_core::discovery::discover(None) {
                 let _ = foreversync_core::addon_cleanup::purge_trash(
@@ -71,6 +82,7 @@ pub fn run() {
                 );
             }
             worker::spawn(app.handle().clone());
+            updates::spawn(app.handle().clone());
             Ok(())
         })
         // Closing the window keeps syncing in the tray; quit from the tray menu.
@@ -93,6 +105,8 @@ pub fn run() {
             commands::status,
             commands::addon_removal_plan,
             commands::remove_addons,
+            commands::check_update,
+            commands::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

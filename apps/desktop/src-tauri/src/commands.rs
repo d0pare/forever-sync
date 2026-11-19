@@ -35,6 +35,8 @@ pub struct AppStateView {
     install_error: Option<String>,
     status: Status,
     data_dir: String,
+    version: String,
+    update: Option<crate::updates::UpdateInfo>,
 }
 
 #[tauri::command]
@@ -63,6 +65,8 @@ pub async fn app_state(app: AppHandle) -> CmdResult<AppStateView> {
             install_error,
             status: state.status.lock().unwrap().clone(),
             data_dir: state.data_dir.display().to_string(),
+            version: app.package_info().version.to_string(),
+            update: state.update.lock().unwrap().clone(),
         })
     })
     .await
@@ -272,4 +276,14 @@ pub async fn remove_addons(app: AppHandle) -> CmdResult<RemovalReport> {
         addon_cleanup::execute(&install.addons_dir(), &plan).map_err(|e| e.to_string())
     })
     .await
+}
+
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> CmdResult<Option<crate::updates::UpdateInfo>> {
+    crate::updates::check(&app).await
+}
+
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> CmdResult<()> {
+    crate::updates::install(&app).await
 }

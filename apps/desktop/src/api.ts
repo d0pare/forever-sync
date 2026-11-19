@@ -32,7 +32,10 @@ export type AppStateView = {
   install_error: string | null;
   status: Status;
   data_dir: string;
+  version: string;
+  update: UpdateInfo | null;
 };
+export type UpdateInfo = { current: string; version: string; notes: string | null };
 export type LoginStart = { user_code: string; verification_uri: string; expires_in: number };
 export type RepoChoice = { full_name: string; private: boolean; initialized: boolean };
 export type RepoSearch = { found: RepoChoice | null; new_repo_url: string; install_url: string };
@@ -65,6 +68,8 @@ export const api = {
   syncNow: (firstSync?: "use-cloud" | "upload-local") => invoke<LastSync | null>("sync_now", { firstSync }),
   addonRemovalPlan: () => invoke<RemovalPlan>("addon_removal_plan"),
   removeAddons: () => invoke<RemovalReport>("remove_addons"),
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
   makeAddonSource: () => invoke<LastSync | null>("sync_now", { addonsSource: true }),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   addons: () => invoke<AddonsView>("addons"),
