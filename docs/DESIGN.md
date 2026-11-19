@@ -280,18 +280,23 @@ In short, the import adds missing addons. It never removes them and never downgr
 | "Play" button | Sync, then open the Battle.net launcher on Forever (best effort) |
 | Manual "Sync now" | Full cycle |
 
-### 7.2 Cycle
+### 7.2 Cycle (as implemented in `foreversync-core/src/sync.rs`)
 ```
-1. scan      WTF (filtered) + addon inventory → file set + manifest   (stat cache, Lua check)
-2. snapshot  build tree; if it differs from local HEAD → commit
-3. fetch     origin/main
-4. merge     3-way per path / per addon package (§7.3)
-5. push      on non-fast-forward → back to 3 (bounded retries)
-6. apply     only while the client is not running: write WTF diffs
+1. fetch     origin/main → refs/remotes/origin/main
+             (a machine with no history adopts the cloud's history first)
+2. snapshot  scan WTF (rules + Lua check); local changes = diff(last OBSERVED disk state, scan)
+             applied on top of main → commit if the tree changed
+3. merge     fast-forward, or per-file 3-way merge commit (§7.3)
+4. push      on non-fast-forward → fetch, merge again, retry (3 attempts)
+5. apply     only while the client is not running: write main into WTF/,
              back up every overwritten or deleted file first (§7.5)
-             compute addon status; if anything is missing → offer the WowUp import string (§6.4)
-7. record    applied tree oid
+6. record    the scanned disk state under a local-only ref
+             (refs/foreversync/disk/<install hash>; never pushed)
 ```
+
+**Why local changes are measured against the last observed disk state, not `main`:** while the game runs, `main` can hold remote changes this machine hasn't applied yet. Diffing disk against `main` would quietly revert them, and would "delete" characters that only exist on another machine. Diffing against what this machine last saw on its own disk picks up only real local edits. If a local edit hits a file with an unapplied remote change, the local edit wins (it is newer) and is reported.
+
+**First sync on a machine** (no observed disk state yet): `use-cloud` (default) keeps cloud versions where both sides have a file and adds local-only files. `upload-local` makes this machine's files win.
 
 ### 7.3 Merge rules
 The unit is a **file** under `wtf/` and a **package** (manifest entry) in the addon manifest. Merging Lua tables line by line can produce invalid or semantically broken files, and WoW discards SavedVariables it cannot load.
@@ -406,7 +411,7 @@ Other risks:
 |---|---|---|
 | M0 | Spikes S1–S4 | Auth model decided; WowUp import round-trip confirmed |
 | M1 ✅ (2026-11-18) | Core + CLI: Forever discovery, rules, scanner + Lua check, snapshot into a local bare repo, apply with backups, game-running gate | Live macOS install: 126 files round-trip byte-exact into a fresh install. **Deferred:** stat cache (a full scan takes about 0.5 s at 4 MB), Windows CI run |
-| M2 | Remote: device flow, bootstrap, fetch/merge/push, conflict policy | Two CLI "machines" stay in sync through GitHub; conflict test matrix passes |
+| M2 ✅ (2026-11-18) | Remote: device flow, token refresh + Keychain, repo setup + privacy guard, fetch/merge/push, conflict policy, restore | Two CLI machines synced through a real private GitHub repo: first sync, edits, a conflict (newest wins, recorded in the merge commit), deletion, restore; token refresh and Keychain storage verified; integration tests cover the same cases plus unapplied remote changes |
 | M3 | Desktop: Tauri shell, onboarding, dashboard, tray, autostart, process and fs watchers | Dogfood on two machines, settings only |
 | M4 | Addons: WowUp reader, folder listing, manifest merge, import string, status checklist | The reference install's 23 addons reproduce on a clean machine through one WowUp import |
 | M5 | History/restore UI, conflicts UI, signing, auto-update | Public beta |

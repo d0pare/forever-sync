@@ -13,7 +13,7 @@ Not affiliated with Blizzard Entertainment.
 apps/desktop/            Tauri 2 app (React + TS UI in src/, Rust shell in src-tauri/)
 crates/foreversync-core     Forever install discovery, rules, sync engine
 crates/foreversync-addons   WowUp reader + import string (no addon file handling)
-crates/foreversync-github   GitHub App config, device flow (next)
+crates/foreversync-github   device flow, token refresh/storage, repo setup
 crates/foreversync-git      bare-repo storage via libgit2
 crates/foreversync-cli      `foreversync` developer CLI
 ```
@@ -23,14 +23,15 @@ crates/foreversync-cli      `foreversync` developer CLI
 Requires Rust (stable), Node 22+ and pnpm.
 
 ```sh
-cargo test --workspace
-cargo run -p foreversync-cli -- detect          # find the Forever install (read-only)
-cargo run -p foreversync-cli -- addons          # WowUp addon list; --import-string prints the string
-cargo run -p foreversync-cli -- status          # WTF/ vs latest snapshot
-cargo run -p foreversync-cli -- snapshot        # commit WTF/ into the local data repo
-cargo run -p foreversync-cli -- log
-cargo run -p foreversync-cli -- --root <copy> apply --dry-run   # write a snapshot back (backs up replaced files)
+cargo test --workspace                          # add `-- --ignored` to also test the real OS keychain
+alias fs='cargo run -q -p foreversync-cli --'
+fs detect                                       # find the Forever install (read-only)
+fs addons [--import-string]                     # WowUp addon list / import string
+fs login                                        # GitHub device-code sign-in (tokens go to the OS keychain)
+fs setup [--repo owner/name]                    # pick the private data repo
+fs sync [--first-sync use-cloud|upload-local] [--policy newest|local|remote]
+fs status | snapshot | log | apply | restore <rev>
 cd apps/desktop && pnpm install && pnpm tauri dev
 ```
 
-The CLI's data folder defaults to `~/Library/Application Support/Forever Sync` (macOS) or `%LOCALAPPDATA%\Forever Sync` (Windows); pass `--data-dir` to use another. `apply` refuses to run while the Forever client is running.
+The CLI's data folder defaults to `~/Library/Application Support/Forever Sync` (macOS) or `%LOCALAPPDATA%\Forever Sync` (Windows); pass `--data-dir` to use another. `apply`, `restore` and `sync` never write into WTF/ while the Forever client is running. `--token-file` (or `FOREVERSYNC_TOKEN_FILE`) keeps tokens in a file instead of the keychain, for development.

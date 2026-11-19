@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+foreversync-git.workspace = true
 full_moon.workspace = true
 serde.workspace = true
 sysinfo.workspace = true
@@ -13,4 +14,5 @@ thiserror.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+git2.workspace = true
 tempfile.workspace = true

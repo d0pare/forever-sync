@@ -6,9 +6,11 @@ pub mod discovery;
 pub mod forever;
 pub mod layout;
 pub mod lua;
+pub mod merge;
 pub mod process;
 pub mod rules;
 pub mod scan;
+pub mod sync;
 
 use std::collections::BTreeMap;
 

@@ -1,29 +1,34 @@
-mod state;
+mod config;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use foreversync_addons::{ImportPayload, default_wowup_dirs, import_string, load_inventory};
-use foreversync_core::{Changes, ForeverInstall, apply, discovery, layout, process, scan};
-use foreversync_git::Store;
+use foreversync_core::sync::{ApplyOutcome, ConflictPolicy, Engine, FirstSync, Integration, SnapshotOutcome};
+use foreversync_core::{Changes, ForeverInstall, discovery, layout, process, scan};
+use foreversync_git::{Remote, Store};
+use foreversync_github::{self as gh, FileStore, KeychainStore, TokenStore};
 
 /// Forever Sync developer CLI.
 ///
-/// `detect`, `addons`, `status` and `log` are read-only. `snapshot` writes only
-/// to the local data repo. `apply` writes into WTF/ (with backups) and refuses
-/// while the Forever client is running.
+/// Read-only: detect, addons, status, log, whoami. `snapshot` writes only to
+/// the local data repo. `apply`, `restore` and `sync` write into WTF/ (with
+/// backups) and won't while the Forever client is running.
 #[derive(Parser)]
 #[command(name = "foreversync", version)]
 struct Cli {
     /// WoW install root (the folder containing `_forever_`). Auto-detected if omitted.
     #[arg(long, global = true)]
     root: Option<PathBuf>,
-    /// Forever Sync data folder (repo, backups, state). Default: OS app-data folder.
+    /// Forever Sync data folder (repo, backups, config). Default: OS app-data folder.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// Print JSON instead of text (detect, addons).
+    /// Keep GitHub tokens in this file instead of the OS keychain (development).
+    #[arg(long, global = true, env = "FOREVERSYNC_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+    /// Print JSON instead of text (detect, addons, sync).
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -43,134 +48,254 @@ enum Command {
         #[arg(long)]
         wowup_dir: Option<PathBuf>,
     },
-    /// Show how WTF/ on disk differs from the latest snapshot.
+    /// Sign in to GitHub with a device code.
+    Login,
+    /// Forget the stored GitHub tokens.
+    Logout,
+    /// Show the signed-in GitHub user.
+    Whoami,
+    /// Choose the private GitHub repo to sync with.
+    Setup {
+        /// `owner/name`; auto-detected from repos the app is installed on if omitted.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Fetch, snapshot, merge, push, and apply (if the game isn't running).
+    Sync {
+        /// On this machine's first sync: whose files win where both exist.
+        #[arg(long, value_enum, default_value_t = FirstSyncArg::UseCloud)]
+        first_sync: FirstSyncArg,
+        /// Who wins when both machines changed the same file.
+        #[arg(long, value_enum, default_value_t = PolicyArg::Newest)]
+        policy: PolicyArg,
+        /// Apply even if a Forever client seems to be running.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show local WTF/ changes not yet recorded in a snapshot.
     Status,
-    /// Record WTF/ as a new commit in the local data repo (if anything changed).
+    /// Record local WTF/ changes as a new commit (local only).
     Snapshot {
-        /// What triggered the snapshot (recorded in the commit).
         #[arg(long, default_value = "manual")]
         trigger: String,
     },
-    /// List recent snapshots.
+    /// List recent commits.
     Log {
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: usize,
     },
-    /// Write a snapshot back into WTF/, backing up every file it replaces.
+    /// Write the latest commit into WTF/ (backs up replaced files).
     Apply {
-        /// Commit to apply (id, `main`, `main~1`, …).
-        #[arg(long, default_value = "main")]
-        rev: String,
-        /// Only show what would change.
         #[arg(long)]
-        dry_run: bool,
-        /// Apply even if a Forever client seems to be running (it will overwrite the result on exit).
+        force: bool,
+    },
+    /// Restore WTF/ to an older commit, as a new commit (undoable).
+    Restore {
+        /// Commit id prefix, `main~2`, …
+        rev: String,
         #[arg(long)]
         force: bool,
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum FirstSyncArg {
+    UseCloud,
+    UploadLocal,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PolicyArg {
+    Newest,
+    Local,
+    Remote,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let install = discovery::discover(cli.root.as_deref())?;
     let data_dir = match &cli.data_dir {
         Some(d) => d.clone(),
         None => dirs::data_local_dir().context("no app-data folder on this OS")?.join("Forever Sync"),
     };
-    let repo_dir = data_dir.join("repo.git");
+    let tokens: Box<dyn TokenStore> = match &cli.token_file {
+        Some(p) => Box::new(FileStore(p.clone())),
+        None => Box::new(KeychainStore::default()),
+    };
+
+    // Commands that don't need the game install.
+    match &cli.command {
+        Command::Login => return login(tokens.as_ref()),
+        Command::Logout => {
+            tokens.clear()?;
+            println!("Signed out.");
+            return Ok(());
+        }
+        Command::Whoami => {
+            let user = gh::Client::new(gh::valid_access_token(tokens.as_ref())?).user()?;
+            println!("{}", user.login);
+            return Ok(());
+        }
+        Command::Setup { repo } => return setup(tokens.as_ref(), &data_dir, repo.as_deref()),
+        Command::Log { limit } => {
+            let store = Store::open_or_init(&data_dir.join("repo.git"))?;
+            for c in store.log(*limit)? {
+                println!("{}  {}  {}", &c.id[..10], format_time(c.time), c.summary);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let install = discovery::discover(cli.root.as_deref())?;
+    let store = Store::open_or_init(&data_dir.join("repo.git"))?;
+    let engine = Engine::new(&install, &store, &data_dir.join("backups"));
 
     match cli.command {
         Command::Detect => detect(&install, cli.json),
         Command::Addons { import_string, wowup_dir } => addons(&install, cli.json, import_string, wowup_dir),
         Command::Status => {
-            let store = Store::open_or_init(&repo_dir)?;
             let scanned = scan::scan_wtf(&install.wtf_dir())?;
-            report_skips(&scanned);
-            let changes = Changes::between(&layout::wtf_only(&store.head_files()?), &scanned.files);
-            if store.head()?.is_none() {
-                println!("No snapshots yet; {} files would be recorded.", scanned.files.len());
-            } else if changes.is_empty() {
-                println!("WTF/ matches the latest snapshot ({} files).", scanned.files.len());
+            report_skips(&scanned.skipped);
+            let reference = match store.files_at_ref(&engine.disk_ref())? {
+                Some(observed) => observed,
+                None => layout::wtf_only(&store.head_files()?),
+            };
+            let changes = Changes::between(&reference, &scanned.files);
+            if changes.is_empty() {
+                println!("No local changes since the last snapshot ({} files).", scanned.files.len());
             } else {
                 print_changes(&changes);
             }
             Ok(())
         }
         Command::Snapshot { trigger } => {
-            let store = Store::open_or_init(&repo_dir)?;
-            let scanned = scan::scan_wtf(&install.wtf_dir())?;
-            report_skips(&scanned);
-            let before = layout::wtf_only(&store.head_files()?);
-            let mut files = layout::base_files();
-            files.extend(scanned.files.clone());
-
-            let host = process::host_name();
-            let message = format!(
-                "Snapshot from \"{host}\" ({trigger})\n\n\
-                 ForeverSync-Machine: {host}\n\
-                 ForeverSync-Trigger: {trigger}\n\
-                 ForeverSync-Client: wowf {}\n\
-                 ForeverSync-Version: {}\n",
-                install.version.as_deref().unwrap_or("unknown"),
-                env!("CARGO_PKG_VERSION"),
-            );
-            match store.snapshot(&files, &message)? {
-                Some(id) => {
-                    print_changes(&Changes::between(&before, &scanned.files));
-                    println!("Committed {} ({} files) to {}", &id.to_string()[..10], scanned.files.len(), repo_dir.display());
-                }
-                None => println!("No changes since the last snapshot ({} files).", scanned.files.len()),
-            }
-            let head = store.head()?.expect("repo has a commit after snapshot");
-            state::set_base(&data_dir, &install, &head.to_string())?;
+            let out = engine.snapshot(&trigger, FirstSync::UseCloud)?;
+            print_snapshot(&out);
             Ok(())
         }
-        Command::Log { limit } => {
-            let store = Store::open_or_init(&repo_dir)?;
-            for c in store.log(limit)? {
-                println!("{}  {}  {}", &c.id[..10], format_time(c.time), c.summary);
-            }
+        Command::Apply { force } => {
+            print_apply(&engine.apply_head(force)?);
             Ok(())
         }
-        Command::Apply { rev, dry_run, force } => {
-            let store = Store::open_or_init(&repo_dir)?;
-            if store.head()?.is_none() {
-                bail!("no snapshots in {}", repo_dir.display());
+        Command::Restore { rev, force } => {
+            let (commit, applied) = engine.restore(&rev, force)?;
+            match commit {
+                Some(c) => println!("Restore committed as {}", &c[..10]),
+                None => println!("Latest commit already matches {rev}."),
             }
-            if !dry_run && !force && process::forever_running(&install.flavor_dir) {
-                bail!("WoW Forever is running from {}. Quit the game first (it overwrites WTF/ on exit).", install.flavor_dir.display());
+            print_apply(&applied);
+            Ok(())
+        }
+        Command::Sync { first_sync, policy, force } => {
+            let cfg = config::load(&data_dir)?.context("no repo configured; run `foreversync setup` first")?;
+            let token = gh::valid_access_token(tokens.as_ref())?;
+            // Privacy guard (DESIGN.md §8.3): never push to a public repo.
+            let info = gh::Client::new(token.clone()).repo(&cfg.repo)?;
+            if !info.private {
+                bail!("{} is public. Forever Sync only syncs to private repos; make it private on GitHub.", cfg.repo);
             }
-            let rev_id = store.resolve(&rev)?;
-            let target = store.files_at(&rev_id)?;
-            let base = match state::base(&data_dir, &install)? {
-                Some(id) => Some(store.files_at(&id)?),
-                None => None,
+            let remote = Remote { url: cfg.clone_url.clone(), token: Some(token) };
+            let first = match first_sync {
+                FirstSyncArg::UseCloud => FirstSync::UseCloud,
+                FirstSyncArg::UploadLocal => FirstSync::UploadLocal,
             };
-            let plan = apply::plan(&install.wtf_dir(), &target, base.as_ref())?;
-            for p in &plan.refused {
-                println!("  ! not allowed by sync rules, ignored: {p}");
-            }
-            if plan.is_empty() {
-                println!("Nothing to apply: WTF/ already matches {rev}.");
+            let policy = match policy {
+                PolicyArg::Newest => ConflictPolicy::NewestWins,
+                PolicyArg::Local => ConflictPolicy::PreferLocal,
+                PolicyArg::Remote => ConflictPolicy::PreferRemote,
+            };
+            let report = engine.sync(Some(&remote), policy, first, "manual", force)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
                 return Ok(());
             }
-            for p in &plan.writes {
-                println!("  write  {p}");
+            print_snapshot(&report.snapshot);
+            match &report.integration {
+                Integration::FastForward => println!("Took changes from {}.", cfg.repo),
+                Integration::Merged { conflicts } => {
+                    println!("Merged changes from {}.", cfg.repo);
+                    for c in conflicts {
+                        println!("  ! conflict {}: kept {:?} version (the other is in history)", c.path, c.kept);
+                    }
+                }
+                Integration::UpToDate | Integration::LocalAhead | Integration::NoRemote => {}
             }
-            for p in &plan.deletes {
-                println!("  delete {p}");
+            if report.pushed {
+                println!("Pushed to {}.", cfg.repo);
             }
-            if dry_run {
-                println!("Dry run: {} writes, {} deletes. Nothing changed.", plan.writes.len(), plan.deletes.len());
+            print_apply(&report.apply);
+            Ok(())
+        }
+        Command::Login | Command::Logout | Command::Whoami | Command::Setup { .. } | Command::Log { .. } => {
+            unreachable!("handled above")
+        }
+    }
+}
+
+fn login(tokens: &dyn TokenStore) -> Result<()> {
+    let code = gh::start_device_flow()?;
+    println!("Open {} and enter code {}", code.verification_uri, code.user_code);
+    println!("Waiting for approval (expires in {} min)…", code.expires_in / 60);
+    let t = gh::poll_device_flow(&code)?;
+    tokens.save(&t)?;
+    let user = gh::Client::new(t.access_token).user()?;
+    println!("Signed in as {}.", user.login);
+    Ok(())
+}
+
+fn setup(tokens: &dyn TokenStore, data_dir: &std::path::Path, repo: Option<&str>) -> Result<()> {
+    let client = gh::Client::new(gh::valid_access_token(tokens)?);
+    let info = match repo {
+        Some(r) => client.repo(r).with_context(|| format!("can't access {r}; is Forever Sync installed on it?"))?,
+        None => match client.find_data_repo()? {
+            Some(d) => {
+                println!(
+                    "Found {} ({})",
+                    d.repo.full_name,
+                    if d.initialized { "has Forever Sync data" } else { "empty, will be initialized" }
+                );
+                d.repo
+            }
+            None => {
+                println!("No data repo found. Create one and give Forever Sync access to it:");
+                println!("  1. {}", gh::config::new_repo_url());
+                println!("  2. {}  (choose \"Only select repositories\")", gh::config::install_url());
+                println!("Then run `foreversync setup` again.");
                 return Ok(());
             }
-            let report = apply::execute(&install.wtf_dir(), &target, &plan, &data_dir.join("backups"))?;
-            println!("Applied {rev}: {} written, {} deleted.", report.written, report.deleted);
-            if let Some(b) = report.backup_dir {
+        },
+    };
+    if !info.private {
+        bail!("{} is public. Make it private first: SavedVariables can contain chat and character data.", info.full_name);
+    }
+    config::save(data_dir, &config::Config { repo: info.full_name.clone(), clone_url: info.clone_url.clone() })?;
+    println!("This machine will sync with {} (private). Run `foreversync sync`.", info.full_name);
+    Ok(())
+}
+
+fn print_snapshot(s: &SnapshotOutcome) {
+    report_skips(&s.skipped);
+    for p in &s.overrode_pending {
+        println!("  ! local edit replaced an incoming change: {p}");
+    }
+    match &s.commit {
+        Some(c) => {
+            print_changes(&s.changes);
+            println!("Snapshot {}.", &c[..10]);
+        }
+        None => println!("No local changes."),
+    }
+}
+
+fn print_apply(a: &ApplyOutcome) {
+    match a {
+        ApplyOutcome::UpToDate => println!("WTF/ is up to date."),
+        ApplyOutcome::GameRunning => println!("WoW Forever is running: changes will be applied after you quit."),
+        ApplyOutcome::Applied(r) => {
+            println!("Applied to WTF/: {} written, {} deleted.", r.written, r.deleted);
+            if let Some(b) = &r.backup_dir {
                 println!("Replaced files backed up to {}", b.display());
             }
-            state::set_base(&data_dir, &install, &rev_id)?;
-            Ok(())
         }
     }
 }
@@ -229,12 +354,9 @@ fn addons(install: &ForeverInstall, json: bool, only_string: bool, wowup_dir: Op
     Ok(())
 }
 
-fn report_skips(scanned: &scan::ScanResult) {
-    for s in &scanned.skipped {
+fn report_skips(skipped: &[scan::Skipped]) {
+    for s in skipped {
         println!("  ! skipped {}: {}", s.path, s.reason);
-    }
-    for (p, size) in &scanned.large {
-        println!("  ! large file ({:.1} MB): {p}", *size as f64 / 1_048_576.0);
     }
 }
 
@@ -251,10 +373,8 @@ fn print_changes(c: &Changes) {
 }
 
 fn format_time(unix: i64) -> String {
-    // Days/hours since epoch without a date crate: good enough for a dev CLI.
     let secs = unix.rem_euclid(86_400);
-    let days = unix.div_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
+    let (y, m, d) = civil_from_days(unix.div_euclid(86_400));
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3600, (secs % 3600) / 60)
 }
 

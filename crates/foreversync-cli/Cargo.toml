@@ -16,5 +16,6 @@ dirs.workspace = true
 foreversync-addons.workspace = true
 foreversync-core.workspace = true
 foreversync-git.workspace = true
+foreversync-github.workspace = true
 serde.workspace = true
 serde_json.workspace = true
