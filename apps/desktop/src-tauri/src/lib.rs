@@ -21,6 +21,8 @@ fn show_main(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Older Windows builds kept data inside the install folder; move it out.
+    let _ = appdata::migrate_legacy_data_dir();
     let data_dir = appdata::default_data_dir().expect("no app-data folder on this OS");
 
     let app = tauri::Builder::default()

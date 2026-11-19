@@ -36,7 +36,7 @@ cd apps/desktop && pnpm install && pnpm tauri dev
 
 The desktop app keeps running in the tray when its window is closed (quit from the tray menu). It syncs a few seconds after WoW Forever exits and every 10 minutes; while the game runs it only uploads, and applies incoming changes after you quit. Release builds turn on start-at-login after setup; debug builds leave that to the Settings toggle.
 
-The CLI's data folder defaults to `~/Library/Application Support/Forever Sync` (macOS) or `%LOCALAPPDATA%\Forever Sync` (Windows); pass `--data-dir` to use another. `apply`, `restore` and `sync` never write into WTF/ while the Forever client is running. `--token-file` (or `FOREVERSYNC_TOKEN_FILE`) keeps tokens in a file instead of the keychain, for development.
+The CLI's data folder defaults to `~/Library/Application Support/Forever Sync` (macOS) or `%LOCALAPPDATA%\io.github.d0pare.foreversync` (Windows; kept apart from the install folder); pass `--data-dir` to use another. `apply`, `restore` and `sync` never write into WTF/ while the Forever client is running. `--token-file` (or `FOREVERSYNC_TOKEN_FILE`) keeps tokens in a file instead of the keychain, for development.
 
 ## Standalone app
 

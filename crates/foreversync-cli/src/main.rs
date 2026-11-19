@@ -121,6 +121,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let data_dir = match &cli.data_dir {
         Some(d) => d.clone(),
+        None if cfg!(windows) => {
+            for item in appdata::migrate_legacy_data_dir()? {
+                eprintln!("Moved {item} to the new data folder.");
+            }
+            appdata::default_data_dir().context("no app-data folder on this OS")?
+        }
         None => appdata::default_data_dir().context("no app-data folder on this OS")?,
     };
     let tokens: Box<dyn TokenStore> = match &cli.token_file {
