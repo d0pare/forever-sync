@@ -405,7 +405,7 @@ Other risks:
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S4 | Auth model decided; WowUp import round-trip confirmed |
-| M1 | Core + CLI: Forever discovery, rules, scanner, snapshot into a local bare repo, apply, backups | `foreversync snapshot` / `apply` round-trips a Forever `WTF/` byte-exact on macOS and Windows CI (fixtures based on §2) |
+| M1 ✅ (2026-11-18) | Core + CLI: Forever discovery, rules, scanner + Lua check, snapshot into a local bare repo, apply with backups, game-running gate | Live macOS install: 126 files round-trip byte-exact into a fresh install. **Deferred:** stat cache (a full scan takes about 0.5 s at 4 MB), Windows CI run |
 | M2 | Remote: device flow, bootstrap, fetch/merge/push, conflict policy | Two CLI "machines" stay in sync through GitHub; conflict test matrix passes |
 | M3 | Desktop: Tauri shell, onboarding, dashboard, tray, autostart, process and fs watchers | Dogfood on two machines, settings only |
 | M4 | Addons: WowUp reader, folder listing, manifest merge, import string, status checklist | The reference install's 23 addons reproduce on a clean machine through one WowUp import |

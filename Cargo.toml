@@ -10,15 +10,20 @@ publish = false
 [workspace.dependencies]
 foreversync-core = { path = "crates/foreversync-core" }
 foreversync-addons = { path = "crates/foreversync-addons" }
+foreversync-git = { path = "crates/foreversync-git" }
 
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+full_moon = "3"
+git2 = { version = "0.21", default-features = false, features = ["https", "vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
+unicode-normalization = "0.1"
 
 # Profiles must live in the workspace root; see https://tauri.app/concept/size/
 [profile.release]

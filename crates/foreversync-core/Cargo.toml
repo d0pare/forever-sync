@@ -6,8 +6,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+full_moon.workspace = true
 serde.workspace = true
+sysinfo.workspace = true
 thiserror.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
