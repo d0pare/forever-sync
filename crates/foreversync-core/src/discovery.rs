@@ -60,20 +60,111 @@ impl ForeverInstall {
     }
 }
 
-/// Finds the Forever install: `explicit` root if given, otherwise the default
-/// install roots for this OS. (Reading Battle.net's product.db comes later.)
+/// Finds the Forever install: `explicit` root if given; otherwise install
+/// roots listed in Battle.net's `product.db`, then this OS's default roots.
 pub fn discover(explicit: Option<&Path>) -> Result<ForeverInstall, DiscoveryError> {
     if let Some(root) = explicit {
         return open(root);
     }
-    let roots = forever::default_install_roots();
-    for root in roots {
-        let root = Path::new(root);
-        if root.join(forever::FLAVOR_DIR).is_dir() {
-            return open(root);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for db in forever::battle_net_product_dbs() {
+        if let Ok(bytes) = fs::read(&db) {
+            candidates.extend(roots_from_product_db(&bytes));
         }
     }
-    Err(DiscoveryError::NotFound(roots.join(", ")))
+    candidates.extend(forever::default_install_roots().iter().map(PathBuf::from));
+
+    let mut seen = std::collections::HashSet::new();
+    for root in candidates.iter().filter(|r| seen.insert((*r).clone())) {
+        if root.join(forever::FLAVOR_DIR).is_dir() {
+            if let Ok(install) = open(root) {
+                return Ok(install);
+            }
+        }
+    }
+    let looked: Vec<String> = seen.iter().map(|p| p.display().to_string()).collect();
+    Err(DiscoveryError::NotFound(if looked.is_empty() { "nowhere".into() } else { looked.join(", ") }))
+}
+
+/// Extracts absolute paths from Battle.net's `product.db`.
+///
+/// The file is protobuf. Rather than depend on its undocumented schema, walk
+/// the wire format generically, collect every string field, and keep those
+/// that are absolute paths (`/Applications/...`, `E:/Games/...`,
+/// `E:\\Games\\...`). Callers then check each for a `_forever_` folder.
+pub fn roots_from_product_db(bytes: &[u8]) -> Vec<PathBuf> {
+    let mut strings = Vec::new();
+    walk_protobuf(bytes, 0, &mut strings);
+    let mut out: Vec<PathBuf> = Vec::new();
+    for s in strings {
+        let b = s.as_bytes();
+        let unix = b.first() == Some(&b'/') && b.get(1).is_some_and(|c| c.is_ascii_alphanumeric());
+        let windows = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\');
+        if !(unix || windows) || s.chars().any(char::is_control) {
+            continue;
+        }
+        let p = PathBuf::from(s.trim_end_matches(['/', '\\']));
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Collects UTF-8 string fields from protobuf-encoded `buf`, recursing into
+/// length-delimited fields that themselves parse as messages. Returns false
+/// if `buf` is not a well-formed message.
+fn walk_protobuf(buf: &[u8], depth: u32, strings: &mut Vec<String>) -> bool {
+    fn varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *buf.get(*pos)?;
+            *pos += 1;
+            v |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+        None
+    }
+    if depth > 16 {
+        return false;
+    }
+    let mut found = Vec::new();
+    let mut pos = 0;
+    while pos < buf.len() {
+        let Some(key) = varint(buf, &mut pos) else { return false };
+        if key >> 3 == 0 {
+            return false;
+        }
+        match key & 7 {
+            0 => {
+                if varint(buf, &mut pos).is_none() {
+                    return false;
+                }
+            }
+            1 => pos += 8,
+            5 => pos += 4,
+            2 => {
+                let Some(len) = varint(buf, &mut pos) else { return false };
+                let Some(end) = pos.checked_add(len as usize).filter(|e| *e <= buf.len()) else { return false };
+                let field = &buf[pos..end];
+                if let Ok(s) = std::str::from_utf8(field) {
+                    found.push(s.to_owned());
+                }
+                if !field.is_empty() {
+                    walk_protobuf(field, depth + 1, &mut found);
+                }
+                pos = end;
+            }
+            _ => return false,
+        }
+        if pos > buf.len() {
+            return false;
+        }
+    }
+    strings.extend(found);
+    true
 }
 
 /// Opens and validates a specific install root.
@@ -237,6 +328,63 @@ mod tests {
         let chars: Vec<_> = acct.realms[0].characters.iter().map(|c| c.folder.as_str()).collect();
         assert_eq!(chars, ["Alpha-One", "Beta-Two"]);
         assert_eq!(install.addons_dir(), root.join("_forever_/Interface/AddOns"));
+    }
+
+    /// Minimal protobuf encoder for building product.db-shaped test data.
+    fn field(num: u64, payload: &[u8]) -> Vec<u8> {
+        fn varint(mut v: u64, out: &mut Vec<u8>) {
+            while v >= 0x80 {
+                out.push((v as u8) | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        }
+        let mut out = Vec::new();
+        varint((num << 3) | 2, &mut out);
+        varint(payload.len() as u64, &mut out);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn extracts_install_paths_from_product_db() {
+        let install = |code: &str, path: &str| {
+            let settings = [field(1, path.as_bytes()), field(4, b"_forever_"), field(2, b"enUS")].concat();
+            field(1, &[field(1, code.as_bytes()), field(2, code.as_bytes()), field(3, &settings)].concat())
+        };
+        let db = [
+            install("wowf", "E:/Games/World of Warcraft/"),
+            install("wowf", "/Applications/World of Warcraft"),
+            install("agent", "C:\\Program Files (x86)\\Battle.net"),
+            install("wowf", "D:\\Games\\World of Warcraft"),
+            field(2, b"not a path"),
+            vec![0x08, 0x96, 0x01], // a varint field
+        ]
+        .concat();
+        let roots: Vec<_> = roots_from_product_db(&db).iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            roots,
+            [
+                "E:/Games/World of Warcraft",
+                "/Applications/World of Warcraft",
+                "C:\\Program Files (x86)\\Battle.net",
+                "D:\\Games\\World of Warcraft",
+            ]
+        );
+        assert!(roots_from_product_db(b"\xff\xff garbage").is_empty());
+        assert!(roots_from_product_db(b"").is_empty());
+    }
+
+    /// Reads this machine's real Battle.net product.db; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_product_db_lists_an_install() {
+        for db in forever::battle_net_product_dbs() {
+            let Ok(bytes) = fs::read(&db) else { continue };
+            let roots = roots_from_product_db(&bytes);
+            println!("{}: {roots:?}", db.display());
+            assert!(roots.iter().any(|r| r.join(forever::FLAVOR_DIR).is_dir()), "no _forever_ root in {roots:?}");
+        }
     }
 
     #[test]

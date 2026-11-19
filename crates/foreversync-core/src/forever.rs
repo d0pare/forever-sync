@@ -31,6 +31,28 @@ pub const WOWUP_CLIENT_TYPE: i64 = 10;
 /// WowUp's `client_type` string in import/export payloads.
 pub const WOWUP_CLIENT_TYPE_NAME: &str = "Forever";
 
+/// Battle.net agent databases that list installed products and their paths.
+pub fn battle_net_product_dbs() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        vec!["/Users/Shared/Battle.net/Agent/product.db".into()]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let program_data = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
+        vec![std::path::Path::new(&program_data).join(r"Battle.net\Agent\product.db")]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+/// Executable of the Forever client inside [`FLAVOR_DIR`] on Windows
+/// (verified on a real install, client 1.60.1.70959). Process detection
+/// matches by path, so this is informational.
+pub const WINDOWS_EXE: &str = "Wow.exe";
+
 /// Install roots checked when Battle.net's product.db can't be read.
 pub fn default_install_roots() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]

@@ -32,7 +32,7 @@ pub enum StoreError {
 }
 
 /// Where to fetch from / push to, and the token for HTTPS (`None` for
-/// local `file://` remotes in tests).
+/// local-path remotes in tests; use a plain path, not `file://`, so it works on Windows).
 #[derive(Clone)]
 pub struct Remote {
     pub url: String,
@@ -376,7 +376,7 @@ mod tests {
 
     fn bare_remote(dir: &Path) -> Remote {
         Repository::init_bare(dir).unwrap();
-        Remote { url: format!("file://{}", dir.display()), token: None }
+        Remote { url: dir.display().to_string(), token: None }
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         let a = s.snapshot(&set(&[("x", "1")]), "a").unwrap().unwrap();
         let other = Store::open_or_init(&tmp.path().join("o.git")).unwrap();
         let o = other.snapshot(&set(&[("y", "1")]), "o").unwrap().unwrap();
-        let remote = Remote { url: format!("file://{}", tmp.path().join("o.git").display()), token: None };
+        let remote = Remote { url: tmp.path().join("o.git").display().to_string(), token: None };
         assert_eq!(s.fetch(&remote).unwrap(), Some(o));
         assert_eq!(s.merge_base(a, o).unwrap(), None);
     }

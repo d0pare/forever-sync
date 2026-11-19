@@ -50,7 +50,7 @@ fn two_machines_through_a_remote() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin.git");
     git2::Repository::init_bare(&origin).unwrap();
-    let remote = Remote { url: format!("file://{}", origin.display()), token: None };
+    let remote = Remote { url: origin.display().to_string(), token: None };
     let a = Machine::new(tmp.path(), "a");
     let b = Machine::new(tmp.path(), "b");
     let nw = ConflictPolicy::NewestWins;
@@ -115,7 +115,7 @@ fn unapplied_remote_change_survives_local_snapshot() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin.git");
     git2::Repository::init_bare(&origin).unwrap();
-    let remote = Remote { url: format!("file://{}", origin.display()), token: None };
+    let remote = Remote { url: origin.display().to_string(), token: None };
     let a = Machine::new(tmp.path(), "a");
     let b = Machine::new(tmp.path(), "b");
     let nw = ConflictPolicy::NewestWins;
