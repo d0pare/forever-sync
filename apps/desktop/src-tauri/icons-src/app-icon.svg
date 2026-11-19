@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Forever Sync: an infinity loop ("Forever") that ends in an arrow (sync). Original artwork. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4c6ef5"/>
+      <stop offset="1" stop-color="#0c8599"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#shine)"/>
+  <path d="M 283 468 C 282 482, 282 497, 282 512 C 282 632, 440 612, 512 512 C 584 412, 742 392, 742 512 C 742 632, 584 612, 512 512 C 497.6 492, 479.8 475.2, 460.4 462.1" fill="none" stroke="#ffffff" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 396 420 L 486 414 L 428 503 Z" fill="#ffffff" stroke="#ffffff" stroke-width="24" stroke-linejoin="round"/>
+</svg>

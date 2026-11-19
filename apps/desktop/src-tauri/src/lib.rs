@@ -42,8 +42,16 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&status, &sep, &sync, &open, &sep, &quit])?;
             *app.state::<AppState>().tray_status.lock().unwrap() = Some(status);
 
+            // macOS: a monochrome template image the menu bar tints for light
+            // and dark mode. Windows: the colour app icon.
+            #[cfg(target_os = "macos")]
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon = app.default_window_icon().cloned().expect("bundle has an icon");
+
             TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().cloned().expect("bundle has an icon"))
+                .icon(tray_icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Forever Sync")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
