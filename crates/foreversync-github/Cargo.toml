@@ -1,0 +1,8 @@
+[package]
+name = "foreversync-github"
+description = "GitHub App device-flow sign-in, token refresh and repo bootstrap"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

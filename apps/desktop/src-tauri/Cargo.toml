@@ -1,0 +1,22 @@
+[package]
+name = "forever-sync-desktop"
+description = "Forever Sync desktop app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# The `_lib` suffix avoids a lib/bin name clash on Windows (cargo#8519).
+name = "forever_sync_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json.workspace = true
+foreversync-core.workspace = true
+foreversync-addons.workspace = true

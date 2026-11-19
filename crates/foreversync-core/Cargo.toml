@@ -1,0 +1,13 @@
+[package]
+name = "foreversync-core"
+description = "Forever install discovery, sync rules and the settings sync engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
