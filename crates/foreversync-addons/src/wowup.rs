@@ -51,7 +51,11 @@ pub struct Inventory {
     pub managed: Vec<ManagedAddon>,
     /// Folders in `Interface/AddOns` that no WowUp record covers. Not synced.
     pub unmanaged_folders: Vec<String>,
-    /// Records dropped as duplicates or because their folders are gone.
+    /// Addons WowUp still lists whose own folders are all missing: being
+    /// updated by WowUp right now, or deleted outside WowUp. Not installed,
+    /// but not uninstalled either, so sync leaves their list entry alone.
+    pub stale: Vec<ManagedAddon>,
+    /// Older duplicate records that were ignored.
     pub dropped_records: usize,
 }
 
@@ -92,13 +96,13 @@ pub fn load_inventory(
     let records: HashMap<String, AddonRecord> = read_json(&wowup_dir.join("addons.json"))?;
     let on_disk = list_folders(addons_dir)?;
 
-    let (managed, dropped_records) = select_managed(records.into_values(), &installation_id, &on_disk);
+    let Selected { managed, stale, dropped } = select_managed(records.into_values(), &installation_id, &on_disk);
 
     let covered: BTreeSet<&str> =
         managed.iter().flat_map(|a| a.folders.iter().map(String::as_str)).collect();
     let unmanaged_folders = on_disk.iter().filter(|f| !covered.contains(f.as_str())).cloned().collect();
 
-    Ok(Inventory { wowup_dir, installation_id, managed, unmanaged_folders, dropped_records })
+    Ok(Inventory { wowup_dir, installation_id, managed, unmanaged_folders, stale, dropped_records: dropped })
 }
 
 // ---------------------------------------------------------------------------
@@ -202,57 +206,77 @@ fn list_folders(addons_dir: &Path) -> Result<Vec<String>, WowUpError> {
     Ok(names)
 }
 
-/// Keeps non-ignored records of `installation_id` whose folders exist on
-/// disk, de-duplicated by `(provider, external_id)`: prefer the record with
-/// all folders present, then the newest `installedAt`.
-fn select_managed(
-    records: impl Iterator<Item = AddonRecord>,
-    installation_id: &str,
-    on_disk: &[String],
-) -> (Vec<ManagedAddon>, usize) {
-    let present: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
-    let mut best: HashMap<(String, String), (bool, String, ManagedAddon)> = HashMap::new();
-    let mut dropped = 0;
+struct Selected {
+    managed: Vec<ManagedAddon>,
+    stale: Vec<ManagedAddon>,
+    dropped: usize,
+}
 
-    for rec in records {
-        if rec.installation_id != installation_id || rec.is_ignored {
-            continue;
+/// Sorts the non-ignored records of `installation_id` into installed and
+/// stale, de-duplicated by `(provider, external_id)` (prefer the record with
+/// all folders present, then the newest `installedAt`).
+///
+/// An addon counts as installed if any folder **it owns** exists. Folders
+/// that several addons list (a shared library) don't count, so an addon
+/// whose own folders were removed isn't kept alive by a shared one.
+fn select_managed(records: impl Iterator<Item = AddonRecord>, installation_id: &str, on_disk: &[String]) -> Selected {
+    let present: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
+    let records: Vec<(String, AddonRecord)> = records
+        .filter(|r| r.installation_id == installation_id && !r.is_ignored)
+        .filter_map(|r| Some((r.external_id.clone().filter(|s| !s.is_empty())?, r)))
+        .collect();
+
+    let mut claims: HashMap<String, BTreeSet<(String, String)>> = HashMap::new();
+    for (ext, rec) in &records {
+        for f in rec.folders() {
+            claims.entry(f).or_default().insert((rec.provider_name.clone(), ext.clone()));
         }
-        let Some(external_id) = rec.external_id.clone().filter(|s| !s.is_empty()) else {
-            continue;
-        };
+    }
+
+    type Best = HashMap<(String, String), (bool, String, ManagedAddon)>;
+    let (mut best, mut stale): (Best, Best) = (HashMap::new(), HashMap::new());
+    let mut dropped = 0;
+    for (external_id, rec) in records {
         let folders = rec.folders();
-        let found = folders.iter().filter(|f| present.contains(f.as_str())).count();
-        if found == 0 {
-            dropped += 1; // uninstalled outside WowUp, or a stale record
+        if folders.is_empty() {
+            dropped += 1;
             continue;
         }
-        let all_present = found == folders.len();
+        let key = (rec.provider_name.clone(), external_id.clone());
+        let owned: Vec<&String> = folders.iter().filter(|f| claims[*f].len() == 1).collect();
+        let deciding: Vec<&String> = if owned.is_empty() { folders.iter().collect() } else { owned };
+        let installed = deciding.iter().any(|f| present.contains(f.as_str()));
+        let all_present = folders.iter().all(|f| present.contains(f.as_str()));
         let installed_at = rec.installed_at.clone().unwrap_or_default();
         let addon = ManagedAddon {
             name: rec.name,
-            provider: rec.provider_name.clone(),
-            external_id: external_id.clone(),
+            provider: rec.provider_name,
+            external_id,
             version_id: rec.installed_external_release_id.filter(|s| !s.is_empty()),
             version: rec.installed_version.filter(|s| !s.is_empty()),
             folders,
         };
-        let key = (rec.provider_name, external_id);
-        match best.get(&key) {
+        let map = if installed { &mut best } else { &mut stale };
+        match map.get(&key) {
             Some((a, t, _)) if (*a, t.as_str()) >= (all_present, installed_at.as_str()) => dropped += 1,
             Some(_) => {
                 dropped += 1;
-                best.insert(key, (all_present, installed_at, addon));
+                map.insert(key, (all_present, installed_at, addon));
             }
             None => {
-                best.insert(key, (all_present, installed_at, addon));
+                map.insert(key, (all_present, installed_at, addon));
             }
         }
     }
+    // An addon with any installed record isn't stale.
+    stale.retain(|k, _| !best.contains_key(k));
 
-    let mut managed: Vec<ManagedAddon> = best.into_values().map(|(_, _, a)| a).collect();
-    managed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.external_id.cmp(&b.external_id)));
-    (managed, dropped)
+    let sorted = |m: Best| {
+        let mut v: Vec<ManagedAddon> = m.into_values().map(|(_, _, a)| a).collect();
+        v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.external_id.cmp(&b.external_id)));
+        v
+    };
+    Selected { managed: sorted(best), stale: sorted(stale), dropped }
 }
 
 #[cfg(test)]
@@ -313,7 +337,37 @@ mod tests {
         assert_eq!(names, [("Pack A", Some("10")), ("single", Some("20"))]);
         assert_eq!(inv.managed[0].folders, ["PackA", "PackA_Options"]);
         assert_eq!(inv.unmanaged_folders, ["HandMade", "IgnoredOne"]);
-        assert_eq!(inv.dropped_records, 2); // older Pack A duplicate + Gone
+        assert_eq!(inv.dropped_records, 1); // older Pack A duplicate
+        let stale: Vec<_> = inv.stale.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(stale, ["Gone"], "listed by WowUp, folders missing");
+    }
+
+    #[test]
+    fn shared_folders_dont_keep_an_addon_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wowup = tmp.path().join("WowUpCf");
+        let flavor = tmp.path().join("World of Warcraft/_forever_");
+        let addons = flavor.join("Interface/AddOns");
+        // X = XMain + SharedLib (XMain removed), Y = YMain + SharedLib, Z = only SharedLib.
+        for f in ["YMain", "SharedLib"] {
+            fs::create_dir_all(addons.join(f)).unwrap();
+        }
+        write(
+            &wowup.join("preferences.json"),
+            json!({ "wow_installations": [{ "id": "inst-forever", "clientType": 10, "location": flavor.join("Wow.exe") }]}),
+        );
+        write(
+            &wowup.join("addons.json"),
+            json!({
+                "1": record("1", "X", "1", "1", "XMain,SharedLib", "2026-11-01T00:00:00Z"),
+                "2": record("2", "Y", "2", "1", "YMain,SharedLib", "2026-11-01T00:00:00Z"),
+                "3": record("3", "Z", "3", "1", "SharedLib", "2026-11-01T00:00:00Z"),
+            }),
+        );
+        let inv = load_inventory(&[wowup], &flavor, &addons).unwrap();
+        let names = |v: &[ManagedAddon]| v.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&inv.managed), ["Y", "Z"], "Z owns nothing, so any folder counts");
+        assert_eq!(names(&inv.stale), ["X"]);
     }
 
     #[test]

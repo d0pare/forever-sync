@@ -187,7 +187,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Detect => detect(&install, cli.json),
-        Command::Addons { remove_uninstalled: true, yes, wowup_dir, .. } => remove_uninstalled(&install, &store, wowup_dir, yes),
+        Command::Addons { remove_uninstalled: true, yes, wowup_dir, .. } => {
+            remove_uninstalled(&engine, &install, &store, wowup_dir, yes)
+        }
         Command::Addons { import_string, missing, wowup_dir, .. } => {
             addons(&install, &store, cli.json, import_string, missing, wowup_dir)
         }
@@ -486,7 +488,8 @@ fn addons(
     let payload = ImportPayload::from_addons(&inv.managed, now_ms);
     let string = import_string(&payload);
     let synced = store.head_files()?;
-    let status = (!addon_sync::packages_in(&synced).is_empty()).then(|| addon_sync::status(&synced, &inv));
+    let observed = store.files_at_ref(&foreversync_core::sync::disk_ref(&install.flavor_dir))?;
+    let status = (!addon_sync::packages_in(&synced).is_empty()).then(|| addon_sync::status(&synced, observed.as_ref(), &inv));
 
     if only_missing {
         match status.as_ref().and_then(|s| s.missing_import.clone()) {
@@ -540,10 +543,11 @@ fn addons(
     Ok(())
 }
 
-fn remove_uninstalled(install: &ForeverInstall, store: &Store, wowup_dir: Option<PathBuf>, yes: bool) -> Result<()> {
+fn remove_uninstalled(engine: &Engine, install: &ForeverInstall, store: &Store, wowup_dir: Option<PathBuf>, yes: bool) -> Result<()> {
     let dirs = wowup_dir.map(|d| vec![d]).unwrap_or_else(default_wowup_dirs);
     let inv = load_inventory(&dirs, &install.flavor_dir, &install.addons_dir())?;
-    let plan = addon_cleanup::plan(&store.head_files()?, &inv, None);
+    let observed = store.files_at_ref(&engine.disk_ref())?;
+    let plan = addon_cleanup::plan(&store.head_files()?, observed.as_ref(), &inv, None);
     if plan.packages.is_empty() {
         println!("Nothing to remove: every addon here is in the synced list.");
         return Ok(());
@@ -567,6 +571,7 @@ fn remove_uninstalled(install: &ForeverInstall, store: &Store, wowup_dir: Option
         bail!("Quit WoW Forever first; addons can't be removed while the game is running.");
     }
     let r = addon_cleanup::execute(&install.addons_dir(), &plan)?;
+    engine.forget_addons(&plan.packages)?;
     println!("Moved {} folder(s).", r.moved.len());
     if let Some(t) = r.trash_dir {
         println!("They're in {} (emptied after 30 days); move them back to restore.", t.display());

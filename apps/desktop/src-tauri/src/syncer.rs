@@ -82,7 +82,11 @@ fn sync_inner(state: &AppState, trigger: &str, first: FirstSync, addons_source: 
     let addon_changes = &report.snapshot.addon_changes;
     let addons = load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir())
         .ok()
-        .and_then(|inv| store.head_files().ok().map(|head| addon_sync::status(&head, &inv)));
+        .and_then(|inv| {
+            let head = store.head_files().ok()?;
+            let observed = store.files_at_ref(&engine.disk_ref()).ok()?;
+            Some(addon_sync::status(&head, observed.as_ref(), &inv))
+        });
     let (written, deleted, pending_apply) = match &report.apply {
         ApplyOutcome::Applied(r) => (r.written, r.deleted, false),
         ApplyOutcome::GameRunning => (0, 0, true),
@@ -151,6 +155,8 @@ pub fn tray_text(s: &Status) -> String {
         "Sync problem: open Forever Sync".into()
     } else if let Some(n) = s.last_sync.as_ref().map(|l| l.addons_missing).filter(|n| *n > 0) {
         format!("{n} addon{} to install with WowUp", if n == 1 { "" } else { "s" })
+    } else if let Some(n) = s.last_sync.as_ref().map(|l| l.addons_removed_elsewhere).filter(|n| *n > 0) {
+        format!("{n} addon{} removed on another computer", if n == 1 { "" } else { "s" })
     } else if s.last_sync.as_ref().is_some_and(|l| l.pending_apply) {
         "Changes wait until you quit WoW".into()
     } else if s.last_sync.is_some() {

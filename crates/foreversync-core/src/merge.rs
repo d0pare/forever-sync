@@ -27,7 +27,9 @@ pub struct MergeResult {
 
 /// Merges `local` and `remote` against their common ancestor `base` (empty
 /// for unrelated histories). When both changed a file differently, `prefer`
-/// wins, except that a change always beats a deletion.
+/// wins, except that a change beats a deletion, and for the addon list the
+/// other way round: an uninstall beats a version update (WowUp updates
+/// addons on its own, so an update says nothing about wanting to keep it).
 pub fn merge3(base: &FileSet, local: &FileSet, remote: &FileSet, prefer: Side) -> MergeResult {
     let mut files = FileSet::new();
     let mut conflicts = Vec::new();
@@ -42,7 +44,10 @@ pub fn merge3(base: &FileSet, local: &FileSet, remote: &FileSet, prefer: Side) -
         } else if r == b {
             l
         } else {
+            let addon = path.starts_with(crate::addon_sync::PACKAGES_PREFIX);
             match (l, r) {
+                (None, Some(_)) if addon => None,
+                (Some(_), None) if addon => None,
                 (None, Some(_)) => r, // local deleted, remote changed: keep the change
                 (Some(_), None) => l,
                 _ => {
@@ -122,6 +127,21 @@ mod tests {
         let m = merge3(&base, &local, &remote, Side::Local);
         assert_eq!(m.files.get("both_diff").unwrap(), b"L");
         assert_eq!(m.files.get("new_both").unwrap(), b"L");
+    }
+
+    #[test]
+    fn addon_uninstall_beats_version_update() {
+        let pkg = "addons/packages/curse-1.json";
+        let base = set(&[(pkg, "v1"), ("wtf/a.lua", "0")]);
+        let updated = set(&[(pkg, "v2"), ("wtf/a.lua", "0")]);
+        let uninstalled = set(&[("wtf/a.lua", "0")]);
+        for prefer in [Side::Local, Side::Remote] {
+            assert!(!merge3(&base, &updated, &uninstalled, prefer).files.contains_key(pkg));
+            assert!(!merge3(&base, &uninstalled, &updated, prefer).files.contains_key(pkg));
+        }
+        // Settings files keep "a change beats a deletion".
+        let changed = set(&[("wtf/a.lua", "1")]);
+        assert!(merge3(&base, &changed, &FileSet::new(), Side::Remote).files.contains_key("wtf/a.lua"));
     }
 
     #[test]

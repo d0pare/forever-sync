@@ -75,7 +75,19 @@ impl Machine {
         let store = Store::open_or_init(&self.data.join("repo.git")).unwrap();
         let install = discovery::open(&self.root).unwrap();
         let inv = foreversync_addons::load_inventory(&self.wowup_dirs(), &install.flavor_dir, &install.addons_dir()).unwrap();
-        foreversync_core::addon_sync::status(&store.head_files().unwrap(), &inv)
+        let observed = store.files_at_ref(&foreversync_core::sync::disk_ref(&install.flavor_dir)).unwrap();
+        foreversync_core::addon_sync::status(&store.head_files().unwrap(), observed.as_ref(), &inv)
+    }
+    fn engine_do<T>(&self, f: impl FnOnce(&Engine, &foreversync_core::ForeverInstall, &Store) -> T) -> T {
+        let install = discovery::open(&self.root).unwrap();
+        let store = Store::open_or_init(&self.data.join("repo.git")).unwrap();
+        let mut engine = Engine::new(&install, &store, &self.data.join("backups"));
+        engine.wowup_dirs = self.wowup_dirs();
+        f(&engine, &install, &store)
+    }
+    fn synced_names(&self) -> Vec<String> {
+        let store = Store::open_or_init(&self.data.join("repo.git")).unwrap();
+        foreversync_core::addon_sync::packages_in(&store.head_files().unwrap()).into_iter().map(|p| p.name).collect()
     }
     fn read(&self, rel: &str) -> Option<String> {
         fs::read_to_string(self.wtf(rel)).ok()
@@ -416,4 +428,81 @@ fn first_sync_preview_matches_what_sync_does() {
     assert!(!p.cloud_has_data);
     assert!(p.use_cloud.this_computer.is_empty());
     assert_eq!(paths(&p.use_cloud.cloud), [format!("Added {SV}/Plater.lua")]);
+}
+
+#[test]
+fn uninstalls_survive_wowup_updates_and_mid_update_scans() {
+    use foreversync_core::addon_cleanup;
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin.git");
+    git2::Repository::init_bare(&origin).unwrap();
+    let remote = Remote { url: origin.display().to_string(), token: None };
+    let pc = Machine::new(tmp.path(), "pc");
+    let mac = Machine::new(tmp.path(), "mac");
+    let nw = ConflictPolicy::NewestWins;
+    let names = |v: &[foreversync_core::addon_sync::PackageFile]| v.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+
+    let all = [("Plater", "1", "v1"), ("Layer", "2", "41"), ("Spoken", "3", "10")];
+    pc.set_wowup(&all);
+    mac.set_wowup(&all);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+
+    // 1. PC uninstalls Spoken while the Mac's WowUp updates it before the Mac
+    //    syncs: the Mac's snapshot (an update) meets the PC's uninstall in a merge.
+    pc.set_wowup(&[("Plater", "1", "v1"), ("Layer", "2", "41")]);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    mac.set_wowup(&[("Plater", "1", "v1"), ("Layer", "2", "41"), ("Spoken", "3", "11")]);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+    assert_eq!(mac.synced_names(), ["Layer", "Plater"], "the update didn't bring Spoken back");
+    assert_eq!(names(&mac.addon_status().removed_elsewhere), ["Spoken"]);
+
+    // 2. PC uninstalls Layer; the Mac syncs that, *then* WowUp updates Layer
+    //    on the Mac: the next snapshot must not re-add it.
+    pc.set_wowup(&[("Plater", "1", "v1")]);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+    mac.set_wowup(&[("Plater", "1", "v1"), ("Layer", "2", "45"), ("Spoken", "3", "11")]);
+    let r = mac.sync(&remote, nw, FirstSync::UseCloud);
+    assert!(r.snapshot.addon_changes.is_empty(), "{:?}", r.snapshot.addon_changes);
+    assert_eq!(mac.synced_names(), ["Plater"]);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    assert!(pc.addon_status().missing.is_empty(), "PC isn't asked to reinstall what it removed");
+
+    // 3. The Mac removes Spoken (to trash) and keeps Layer on every computer.
+    let s = mac.addon_status();
+    assert_eq!(names(&s.removed_elsewhere), ["Layer", "Spoken"]);
+    mac.engine_do(|engine, install, store| {
+        let inv = foreversync_addons::load_inventory(&engine.wowup_dirs, &install.flavor_dir, &install.addons_dir()).unwrap();
+        let observed = store.files_at_ref(&engine.disk_ref()).unwrap();
+        let only = [("Curse".to_owned(), "3".to_owned())];
+        let plan = addon_cleanup::plan(&store.head_files().unwrap(), observed.as_ref(), &inv, Some(&only));
+        assert_eq!(plan.folders, ["Spoken"]);
+        addon_cleanup::execute(&install.addons_dir(), &plan).unwrap();
+        engine.forget_addons(&plan.packages).unwrap();
+        let keep: Vec<_> = s.removed_elsewhere.iter().filter(|p| p.name == "Layer").cloned().collect();
+        engine.forget_addons(&keep).unwrap();
+    });
+    let st = mac.addon_status();
+    assert!(st.removed_elsewhere.is_empty(), "{:?}", names(&st.removed_elsewhere));
+    assert_eq!(names(&st.new_here), ["Layer"]);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+    assert_eq!(mac.synced_names(), ["Layer", "Plater"], "kept addon is back on the list; Spoken stays off");
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    assert_eq!(names(&pc.addon_status().missing), ["Layer"]);
+
+    // 4. A later reinstall of Spoken on the Mac counts as new and propagates.
+    mac.set_wowup(&[("Plater", "1", "v1"), ("Layer", "2", "45"), ("Spoken", "3", "12")]);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+    assert_eq!(mac.synced_names(), ["Layer", "Plater", "Spoken"]);
+
+    // 5. Mid-update on the PC: WowUp still lists Plater but its folder is
+    //    briefly gone. That isn't an uninstall.
+    fs::remove_dir_all(pc.root.join("_forever_/Interface/AddOns/Plater")).unwrap();
+    let r = pc.sync(&remote, nw, FirstSync::UseCloud);
+    assert!(r.snapshot.addon_changes.deleted.is_empty(), "{:?}", r.snapshot.addon_changes);
+    let st = pc.addon_status();
+    assert_eq!(names(&st.missing), ["Layer", "Spoken"], "only what the Mac added");
+    assert!(st.removed_here.is_empty(), "Plater is updating, not uninstalled");
+    assert!(mac.synced_names().contains(&"Plater".to_owned()));
 }

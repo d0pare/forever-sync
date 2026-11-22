@@ -84,7 +84,7 @@ impl Engine<'_> {
         } else {
             load_inventory(&self.wowup_dirs, &self.install.flavor_dir, &self.install.addons_dir())
                 .ok()
-                .map(|inv| addon_sync::status(&head_files, &inv).missing.len())
+                .map(|inv| addon_sync::status(&head_files, observed.as_ref(), &inv).missing.len())
         };
         Ok(FirstSyncPreview {
             cloud_has_data: remote_head.is_some() && head_files.contains_key("foreversync.json"),

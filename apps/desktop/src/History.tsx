@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { plural } from "./util";
 import { api, ConflictNote, HistoryDetails, HistoryEntry, RestoreResult, RestoreScope, SettingsFile } from "./api";
 
 const TRIGGERS: Record<string, string> = {
@@ -8,6 +9,7 @@ const TRIGGERS: Record<string, string> = {
   "while-playing": "while playing",
   restore: "restore",
   "addons-source": "addon list set",
+  "keep-addons": "kept addons",
 };
 
 function title(e: HistoryEntry) {
@@ -34,9 +36,6 @@ function when(t: number) {
     : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function plural(n: number, w: string) {
-  return `${n} ${w}${n === 1 ? "" : "s"}`;
-}
 
 export function History({ onRestored }: { onRestored: () => void }) {
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null);

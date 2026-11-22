@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreversync_addons::{ImportPayload, Inventory, default_wowup_dirs, import_string, load_inventory};
 use foreversync_core::addon_cleanup::{self, RemovalPlan, RemovalReport};
-use foreversync_core::addon_sync::{self, AddonStatus};
+use foreversync_core::addon_sync::{self, AddonRow, AddonStatus, PackageFile};
 use foreversync_core::process;
 use foreversync_core::appdata::{self, RepoConfig};
-use foreversync_core::sync::FirstSync;
+use foreversync_core::sync::{Engine, FirstSync, disk_ref};
 use foreversync_core::{ForeverInstall, discovery};
 use foreversync_github::{self as gh, KeychainStore, TokenStore};
 use serde::{Deserialize, Serialize};
@@ -218,36 +218,108 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<bool> {
     al.is_enabled().map_err(|e| e.to_string())
 }
 
-#[derive(Serialize)]
-pub struct AddonsView {
-    inventory: Option<Inventory>,
-    error: Option<String>,
-    /// Import string for everything installed here.
-    import_string: Option<String>,
-    /// This machine vs the synced list (from the last sync; no network).
-    status: Option<AddonStatus>,
-    /// Number of addons in the synced list.
-    synced_count: usize,
+/// One addon to act on, by WowUp provider and id.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddonKey {
+    provider: String,
+    id: String,
 }
 
-/// WowUp addon list, how it compares with the synced list, import strings.
+#[derive(Serialize)]
+pub struct TrashInfo {
+    dir: String,
+    batches: usize,
+}
+
+#[derive(Serialize)]
+pub struct AddonsView {
+    /// Why WowUp couldn't be read, if it couldn't.
+    error: Option<String>,
+    wowup_dir: Option<String>,
+    /// Every addon in the synced list or installed here.
+    rows: Vec<AddonRow>,
+    status: Option<AddonStatus>,
+    /// Folders in AddOns that WowUp doesn't manage (not synced).
+    unmanaged_folders: Vec<String>,
+    /// Import string for everything installed here.
+    import_string: Option<String>,
+    synced_count: usize,
+    trash: Option<TrashInfo>,
+    game_running: bool,
+}
+
+/// The synced list (local `main`, as of the last sync), this machine's
+/// observed list at that sync, and the WowUp inventory.
+struct AddonContext {
+    install: ForeverInstall,
+    store: foreversync_git::Store,
+    synced: foreversync_core::FileSet,
+    observed: Option<foreversync_core::FileSet>,
+    inventory: Result<Inventory, String>,
+}
+
+fn addon_context(app: &AppHandle) -> CmdResult<AddonContext> {
+    let install = discovery::discover(None).map_err(|e| e.to_string())?;
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    let store = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir)).map_err(|e| e.to_string())?;
+    let synced = store.head_files().map_err(|e| e.to_string())?;
+    let observed = store.files_at_ref(&disk_ref(&install.flavor_dir)).map_err(|e| e.to_string())?;
+    let inventory =
+        load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir()).map_err(|e| e.to_string());
+    Ok(AddonContext { install, store, synced, observed, inventory })
+}
+
+/// Keeps the dashboard and tray addon counts current outside of syncs.
+fn refresh_addon_counts(app: &AppHandle, status: &AddonStatus) {
+    crate::syncer::update_status(app, |s| {
+        if let Some(last) = s.last_sync.as_mut() {
+            last.addons_missing = status.missing.len();
+            last.addons_removed_elsewhere = status.removed_elsewhere.len();
+        }
+    });
+}
+
+/// Everything the Addons tab shows.
 #[tauri::command]
 pub async fn addons(app: AppHandle) -> CmdResult<AddonsView> {
     blocking(move || {
-        let install = discovery::discover(None).map_err(|e| e.to_string())?;
-        let data_dir = app.state::<AppState>().data_dir.clone();
-        let synced = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir))
-            .and_then(|s| s.head_files())
-            .unwrap_or_default();
-        let synced_count = addon_sync::packages_in(&synced).len();
-        Ok(match load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir()) {
+        let ctx = addon_context(&app)?;
+        let synced_count = addon_sync::packages_in(&ctx.synced).len();
+        let trash_root = ctx.install.addons_dir().parent().map(|p| p.join(addon_cleanup::TRASH_DIR));
+        let trash = trash_root.and_then(|dir| {
+            let batches = std::fs::read_dir(&dir).ok()?.filter_map(Result::ok).filter(|e| e.path().is_dir()).count();
+            (batches > 0).then(|| TrashInfo { dir: dir.display().to_string(), batches })
+        });
+        let game_running = process::forever_running(&ctx.install.flavor_dir);
+        Ok(match ctx.inventory {
             Ok(inv) => {
                 let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                let s = import_string(&ImportPayload::from_addons(&inv.managed, now_ms));
-                let status = (synced_count > 0).then(|| addon_sync::status(&synced, &inv));
-                AddonsView { inventory: Some(inv), error: None, import_string: Some(s), status, synced_count }
+                let import = import_string(&ImportPayload::from_addons(&inv.managed, now_ms));
+                let status = addon_sync::status(&ctx.synced, ctx.observed.as_ref(), &inv);
+                refresh_addon_counts(&app, &status);
+                AddonsView {
+                    error: None,
+                    wowup_dir: Some(inv.wowup_dir.display().to_string()),
+                    rows: addon_sync::overview(&ctx.synced, ctx.observed.as_ref(), &inv),
+                    status: Some(status),
+                    unmanaged_folders: inv.unmanaged_folders.clone(),
+                    import_string: Some(import),
+                    synced_count,
+                    trash,
+                    game_running,
+                }
             }
-            Err(e) => AddonsView { inventory: None, error: Some(e.to_string()), import_string: None, status: None, synced_count },
+            Err(e) => AddonsView {
+                error: Some(e),
+                wowup_dir: None,
+                rows: Vec::new(),
+                status: None,
+                unmanaged_folders: Vec::new(),
+                import_string: None,
+                synced_count,
+                trash,
+                game_running,
+            },
         })
     })
     .await
@@ -258,38 +330,80 @@ pub fn status(state: State<'_, AppState>) -> Status {
     state.status.lock().unwrap().clone()
 }
 
-fn synced_and_local(app: &AppHandle) -> CmdResult<(ForeverInstall, foreversync_core::FileSet, Inventory)> {
-    let install = discovery::discover(None).map_err(|e| e.to_string())?;
-    let data_dir = app.state::<AppState>().data_dir.clone();
-    let synced = foreversync_git::Store::open_or_init(&appdata::repo_dir(&data_dir))
-        .and_then(|s| s.head_files())
-        .map_err(|e| e.to_string())?;
-    let inv = load_inventory(&default_wowup_dirs(), &install.flavor_dir, &install.addons_dir()).map_err(|e| e.to_string())?;
-    Ok((install, synced, inv))
+fn only_keys(keys: &Option<Vec<AddonKey>>) -> Option<Vec<(String, String)>> {
+    keys.as_ref().map(|v| v.iter().map(|k| (k.provider.clone(), k.id.clone())).collect())
 }
 
-/// What "remove addons uninstalled on other computers" would move to trash.
+/// What removing addons uninstalled on other computers would move to trash
+/// (all of them, or just `keys`).
 #[tauri::command]
-pub async fn addon_removal_plan(app: AppHandle) -> CmdResult<RemovalPlan> {
+pub async fn addon_removal_plan(app: AppHandle, keys: Option<Vec<AddonKey>>) -> CmdResult<RemovalPlan> {
     blocking(move || {
-        let (_, synced, inv) = synced_and_local(&app)?;
-        Ok(addon_cleanup::plan(&synced, &inv, None))
+        let ctx = addon_context(&app)?;
+        let inv = ctx.inventory?;
+        Ok(addon_cleanup::plan(&ctx.synced, ctx.observed.as_ref(), &inv, only_keys(&keys).as_deref()))
     })
     .await
 }
 
 /// Moves addons uninstalled on other computers to the AddOns trash.
 #[tauri::command]
-pub async fn remove_addons(app: AppHandle) -> CmdResult<RemovalReport> {
+pub async fn remove_addons(app: AppHandle, keys: Option<Vec<AddonKey>>) -> CmdResult<RemovalReport> {
     blocking(move || {
-        let (install, synced, inv) = synced_and_local(&app)?;
-        if process::forever_running(&install.flavor_dir) {
+        let state = app.state::<AppState>();
+        // No sync may record the observed state halfway through.
+        let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+        let ctx = addon_context(&app)?;
+        if process::forever_running(&ctx.install.flavor_dir) {
             return Err("Quit WoW Forever first; addons can't be removed while the game is running.".into());
         }
-        let plan = addon_cleanup::plan(&synced, &inv, None);
-        addon_cleanup::execute(&install.addons_dir(), &plan).map_err(|e| e.to_string())
+        let inv = ctx.inventory?;
+        let plan = addon_cleanup::plan(&ctx.synced, ctx.observed.as_ref(), &inv, only_keys(&keys).as_deref());
+        let report = addon_cleanup::execute(&ctx.install.addons_dir(), &plan).map_err(|e| e.to_string())?;
+        // Forget them here, so a later reinstall counts as new.
+        let engine = Engine::new(&ctx.install, &ctx.store, &appdata::backups_dir(&state.data_dir));
+        engine.forget_addons(&plan.packages).map_err(|e| e.to_string())?;
+        if let Ok(inv) = load_inventory(&default_wowup_dirs(), &ctx.install.flavor_dir, &ctx.install.addons_dir()) {
+            let observed = ctx.store.files_at_ref(&engine.disk_ref()).ok().flatten();
+            refresh_addon_counts(&app, &addon_sync::status(&ctx.synced, observed.as_ref(), &inv));
+        }
+        Ok(report)
     })
     .await
+}
+
+/// Keeps addons that were uninstalled on another computer: they go back on
+/// the synced list, so the other computers are asked to install them again.
+#[tauri::command]
+pub async fn keep_addons(app: AppHandle, keys: Vec<AddonKey>) -> CmdResult<Option<LastSync>> {
+    blocking(move || {
+        {
+            let state = app.state::<AppState>();
+            let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+            let ctx = addon_context(&app)?;
+            let inv = ctx.inventory?;
+            let status = addon_sync::status(&ctx.synced, ctx.observed.as_ref(), &inv);
+            let keep: Vec<PackageFile> = status
+                .removed_elsewhere
+                .into_iter()
+                .filter(|p| keys.iter().any(|k| k.provider == p.provider && k.id == p.id))
+                .collect();
+            let engine = Engine::new(&ctx.install, &ctx.store, &appdata::backups_dir(&state.data_dir));
+            engine.forget_addons(&keep).map_err(|e| e.to_string())?;
+        }
+        // The next snapshot sees them as newly installed and adds them back.
+        run_sync(&app, "keep-addons", FirstSync::UseCloud, false)
+    })
+    .await
+}
+
+/// Opens the folder holding removed addons (kept 30 days).
+#[tauri::command]
+pub async fn open_addon_trash(app: AppHandle) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let install = discovery::discover(None).map_err(|e| e.to_string())?;
+    let dir = install.addons_dir().parent().map(|p| p.join(addon_cleanup::TRASH_DIR)).ok_or("no Interface folder")?;
+    app.opener().open_path(dir.display().to_string(), None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

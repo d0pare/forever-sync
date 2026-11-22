@@ -94,6 +94,17 @@ pub struct SyncReport {
     pub addon_list_reset: Option<Changes>,
 }
 
+/// Local-only ref holding the last observed state of the install at
+/// `flavor_dir`: its synced WTF/ files and its WowUp addon list.
+pub fn disk_ref(flavor_dir: &Path) -> String {
+    // FNV-1a: stable across Rust versions, unlike DefaultHasher.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in flavor_dir.to_string_lossy().as_bytes() {
+        h = (h ^ u64::from(*b)).wrapping_mul(0x100000001b3);
+    }
+    format!("refs/foreversync/disk/{h:016x}")
+}
+
 pub struct Engine<'a> {
     pub install: &'a ForeverInstall,
     pub store: &'a Store,
@@ -159,6 +170,16 @@ impl<'a> Engine<'a> {
             match load_inventory(&self.wowup_dirs, &self.install.flavor_dir, &self.install.addons_dir()) {
                 Ok(inv) => {
                     files.extend(addon_sync::files_from_inventory(&inv));
+                    // Folders missing but WowUp still lists it (mid-update, most
+                    // likely): keep what we saw before rather than call it uninstalled.
+                    if let Some(prev) = previous {
+                        for a in &inv.stale {
+                            let path = addon_sync::package_path(&a.provider, &a.external_id);
+                            if let Some(bytes) = prev.get(&path) {
+                                files.entry(path).or_insert_with(|| bytes.clone());
+                            }
+                        }
+                    }
                     None
                 }
                 Err(e) => {
@@ -170,14 +191,22 @@ impl<'a> Engine<'a> {
         Ok(Observed { files, skipped: scanned.skipped, addons_error })
     }
 
-    /// Local-only ref holding the last observed state of this install's WTF/.
+    /// Local-only ref holding the last observed state of this install.
     pub fn disk_ref(&self) -> String {
-        // FNV-1a: stable across Rust versions, unlike DefaultHasher.
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in self.install.flavor_dir.to_string_lossy().as_bytes() {
-            h = (h ^ u64::from(*b)).wrapping_mul(0x100000001b3);
+        disk_ref(&self.install.flavor_dir)
+    }
+
+    /// Drops `packages` from this machine's observed addon list without
+    /// touching `main`. Used after removing addons uninstalled elsewhere (so
+    /// a later reinstall counts as new), and to keep one: the next snapshot
+    /// then sees it as newly installed and adds it back to the list.
+    pub fn forget_addons(&self, packages: &[addon_sync::PackageFile]) -> Result<()> {
+        let Some(mut observed) = self.store.files_at_ref(&self.disk_ref())? else { return Ok(()) };
+        for p in packages {
+            observed.remove(&addon_sync::package_path(&p.provider, &p.id));
         }
-        format!("refs/foreversync/disk/{h:016x}")
+        self.store.set_files_ref(&self.disk_ref(), &observed, "forget addons")?;
+        Ok(())
     }
 
     /// What a snapshot commits: `head_files` plus this machine's changes
@@ -203,6 +232,11 @@ impl<'a> Engine<'a> {
                         continue; // unchanged on disk since last look
                     }
                     let head = head_files.get(path);
+                    if head.is_none() && prev.contains_key(path) && path.starts_with(addon_sync::PACKAGES_PREFIX) {
+                        // Uninstalled on another computer, then updated here by
+                        // WowUp: an update doesn't bring it back to the list.
+                        continue;
+                    }
                     if head.is_some() && head != prev.get(path) && head != Some(bytes) {
                         overrode_pending.push(path.clone());
                     }

@@ -263,13 +263,23 @@ How WowUp handles an import (this sets what we can promise):
 In short, the import adds missing addons. It never removes them and never downgrades. Versions then converge, because WowUp keeps both machines on latest.
 
 ### 6.4 Status and removals (as implemented: `foreversync-core/src/addon_sync.rs`)
-- After every sync, compare the synced list with this machine's WowUp inventory:
-  - **missing**: in the list, not installed here,
-  - **removed elsewhere**: installed here, gone from the list,
-  - **in sync**: present in both. Version differences don't count; WowUp keeps each machine on latest.
-- **Missing addons** show as a highlighted callout with **Copy WowUp import for these** (a string for just the missing ones), and the tray says "N addons to install with WowUp". The CLI equivalent is `foreversync addons --missing`.
-- **Removed elsewhere** is listed with a **Remove from this computer…** button (§6.5).
-- After WowUp installs them, the next sync records them and the status clears.
+Three lists are compared: the synced list (`main`), this machine's WowUp inventory, and the list this machine had at its last sync (the observed state, `refs/foreversync/disk/…`). The observed list is what separates "installed here since the last sync" from "uninstalled on another computer":
+
+| State | Synced list | Installed here | Seen here at last sync |
+|---|---|---|---|
+| **in sync** | yes | yes | — |
+| **missing** (to install) | yes | no | no |
+| **removed elsewhere** | no | yes | yes |
+| **new here** (added at the next sync) | no | yes | no |
+| **uninstalled here** (dropped at the next sync) | yes | no | yes |
+| **updating** | yes | WowUp lists it, folders missing | — |
+
+- Version differences don't count; WowUp keeps each machine on latest. The Addons tab marks them ("other version elsewhere").
+- **Installed** means at least one folder the addon *owns* exists. A folder several addons list (a shared library) doesn't keep an addon alive.
+- **Stale records** (WowUp lists the addon, its folders are missing; usually WowUp replacing them mid-update) are neither installed nor uninstalled: sync keeps their previous list entry instead of publishing an uninstall.
+- **An uninstall beats a version update.** WowUp updates addons on its own, so on the machine that still has an addon, an update after another machine uninstalled it doesn't bring it back: the snapshot skips package changes the list already dropped, and the merge lets a package deletion win over a modification (settings files keep "a change beats a deletion").
+- The desktop **Addons tab** shows the summary, a "to install" card with the WowUp import string for just those, a "removed on another computer" card (per-addon **Remove from this computer…** or **Keep on all computers**), pending changes, and a searchable table of every addon with both versions. The tray says "N addons to install" or "N addons removed on another computer". CLI: `foreversync addons --missing`.
+- **Keep on all computers** drops the addon from this machine's observed list; the next snapshot then sees it as newly installed and puts it back on the list, so the other computers are asked to install it again.
 
 ---
 
@@ -279,7 +289,7 @@ WowUp's import adds addons but never removes them, so Forever Sync can do the re
 - **Only** WowUp-managed addons that are installed here but gone from the synced list. Folders WowUp doesn't manage are never touched, and neither is any folder another kept or synced addon still lists (e.g. a shared library folder).
 - **Recoverable:** folders are *moved* to `_forever_/Interface/.foreversync-trash/<unix-ms>/`. It's on the same drive, so it's instant, and WoW loads only `Interface/AddOns`. Batches older than 30 days are purged when the app starts. To restore, move the folder back.
 - **Never while the game runs** (Windows may hold the files open).
-- WowUp drops its record of the addon the next time it scans. Forever Sync already ignores records whose folders are gone.
+- After moving, the addons are dropped from this machine's observed list, so a later reinstall counts as new and goes back on the list. WowUp drops its record of the addon the next time it scans; until then the record is stale and ignored.
 
 ---
 
@@ -323,7 +333,7 @@ The unit is a **file** under `wtf/` and a **package** (manifest entry) in the ad
 | changed | changed, same | take either |
 | changed | changed, different | **conflict** → policy |
 | deleted | unchanged | delete (only for paths Forever Sync tracked) |
-| deleted | changed | keep the changed version |
+| deleted | changed | keep the changed version; **for addon packages, delete** (an uninstall beats a version update) |
 
 Conflict policy: **newest snapshot wins, with a notification** (an OS notification names the file and points to History) (default; the loser is one click away in history), or always ask, or prefer this machine, or prefer the remote. A missing character or account folder is **never** read as a deletion.
 

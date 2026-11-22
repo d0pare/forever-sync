@@ -125,6 +125,8 @@ pub fn run() {
             commands::status,
             commands::addon_removal_plan,
             commands::remove_addons,
+            commands::keep_addons,
+            commands::open_addon_trash,
             commands::check_update,
             commands::install_update,
             commands::history,

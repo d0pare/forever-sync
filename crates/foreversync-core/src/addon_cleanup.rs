@@ -41,10 +41,16 @@ pub struct RemovalReport {
     pub trash_dir: Option<PathBuf>,
 }
 
-/// What removing the uninstalled-elsewhere addons would do. `only` limits it
-/// to those `(provider, id)` keys; `None` means all of them.
-pub fn plan(synced: &FileSet, local: &Inventory, only: Option<&[(String, String)]>) -> RemovalPlan {
-    let status = addon_sync::status(synced, local);
+/// What removing the uninstalled-elsewhere addons would do. `observed` is
+/// this machine's addon list at its last sync (see [`addon_sync::status`]).
+/// `only` limits it to those `(provider, id)` keys; `None` means all of them.
+pub fn plan(
+    synced: &FileSet,
+    observed: Option<&FileSet>,
+    local: &Inventory,
+    only: Option<&[(String, String)]>,
+) -> RemovalPlan {
+    let status = addon_sync::status(synced, observed, local);
     let packages: Vec<PackageFile> = status
         .removed_elsewhere
         .into_iter()
@@ -148,6 +154,7 @@ mod tests {
             installation_id: "i".into(),
             managed: addons,
             unmanaged_folders: vec!["HandMade".into()],
+            stale: vec![],
             dropped_records: 0,
         }
     }
@@ -166,13 +173,18 @@ mod tests {
             addon("Extra", "3", &["Extra", "Extra_Options", "LibShared"]),
             addon("Gone", "4", &["Gone"]),
         ]);
-        let p = plan(&synced, &local, None);
+        // Both were synced from here before, so they were removed elsewhere.
+        let observed = addon_sync::files_from_inventory(&local);
+        let p = plan(&synced, Some(&observed), &local, None);
         assert_eq!(p.packages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Extra", "Gone"]);
         assert_eq!(p.folders, ["Extra", "Extra_Options", "Gone"]);
         assert_eq!(p.kept_shared, ["LibShared"]);
 
-        let only = plan(&synced, &local, Some(&[("Curse".into(), "4".into())]));
+        let only = plan(&synced, Some(&observed), &local, Some(&[("Curse".into(), "4".into())]));
         assert_eq!(only.folders, ["Gone"]);
+
+        // Never synced from here: new installs, not removals.
+        assert!(plan(&synced, None, &local, None).folders.is_empty());
     }
 
     #[test]

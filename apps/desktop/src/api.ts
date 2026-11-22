@@ -45,17 +45,35 @@ export type PackageFile = { name: string; provider: string; id: string; version:
 export type AddonStatus = {
   missing: PackageFile[];
   removed_elsewhere: PackageFile[];
+  new_here: PackageFile[];
+  removed_here: PackageFile[];
   in_sync: number;
   missing_import: string | null;
 };
 export type RemovalPlan = { packages: PackageFile[]; folders: string[]; kept_shared: string[] };
 export type RemovalReport = { moved: string[]; trash_dir: string | null };
+export type AddonState = "in_sync" | "missing" | "removed_elsewhere" | "new_here" | "removed_here" | "updating";
+export type AddonRow = {
+  name: string;
+  provider: string;
+  id: string;
+  state: AddonState;
+  version_here: string | null;
+  version_synced: string | null;
+  other_version: boolean;
+  folders: string[];
+};
+export type AddonKey = { provider: string; id: string };
 export type AddonsView = {
-  inventory: Inventory | null;
   error: string | null;
-  import_string: string | null;
+  wowup_dir: string | null;
+  rows: AddonRow[];
   status: AddonStatus | null;
+  unmanaged_folders: string[];
+  import_string: string | null;
   synced_count: number;
+  trash: { dir: string; batches: number } | null;
+  game_running: boolean;
 };
 
 export type HistoryKind = "snapshot" | "merge" | "restore" | "addonssource" | "other";
@@ -122,8 +140,10 @@ export const api = {
   chooseRepo: (fullName: string) => invoke<RepoChoice>("choose_repo", { fullName }),
   firstSyncPreview: () => invoke<FirstSyncPreview>("first_sync_preview"),
   syncNow: (firstSync?: "use-cloud" | "upload-local") => invoke<LastSync | null>("sync_now", { firstSync }),
-  addonRemovalPlan: () => invoke<RemovalPlan>("addon_removal_plan"),
-  removeAddons: () => invoke<RemovalReport>("remove_addons"),
+  addonRemovalPlan: (keys?: AddonKey[]) => invoke<RemovalPlan>("addon_removal_plan", { keys }),
+  removeAddons: (keys?: AddonKey[]) => invoke<RemovalReport>("remove_addons", { keys }),
+  keepAddons: (keys: AddonKey[]) => invoke<LastSync | null>("keep_addons", { keys }),
+  openAddonTrash: () => invoke<void>("open_addon_trash"),
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   makeAddonSource: () => invoke<LastSync | null>("sync_now", { addonsSource: true }),
