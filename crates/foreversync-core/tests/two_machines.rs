@@ -63,6 +63,13 @@ impl Machine {
         }
         fs::write(d.join("addons.json"), serde_json::Value::Object(records).to_string()).unwrap();
     }
+    /// Names of the addons the fake WowUp lists (any folder state).
+    fn wowup_record_names(&self) -> Vec<String> {
+        let d = self.data.parent().unwrap().join("WowUpCf");
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(d.join("addons.json")).unwrap()).unwrap();
+        map.values().filter_map(|r| r["name"].as_str().map(str::to_owned)).collect()
+    }
     fn sync_as_addon_source(&self, remote: &Remote) -> foreversync_core::sync::SyncReport {
         let install = discovery::open(&self.root).unwrap();
         let store = Store::open_or_init(&self.data.join("repo.git")).unwrap();
@@ -478,7 +485,8 @@ fn uninstalls_survive_wowup_updates_and_mid_update_scans() {
         let only = [("Curse".to_owned(), "3".to_owned())];
         let plan = addon_cleanup::plan(&store.head_files().unwrap(), observed.as_ref(), &inv, Some(&only));
         assert_eq!(plan.folders, ["Spoken"]);
-        addon_cleanup::execute(&install.addons_dir(), &plan).unwrap();
+        let r = addon_cleanup::execute(&install.addons_dir(), &inv, &plan).unwrap();
+        assert_eq!(r.forgotten, ["Spoken"]);
         engine.forget_addons(&plan.packages).unwrap();
         let keep: Vec<_> = s.removed_elsewhere.iter().filter(|p| p.name == "Layer").cloned().collect();
         engine.forget_addons(&keep).unwrap();
@@ -486,6 +494,9 @@ fn uninstalls_survive_wowup_updates_and_mid_update_scans() {
     let st = mac.addon_status();
     assert!(st.removed_elsewhere.is_empty(), "{:?}", names(&st.removed_elsewhere));
     assert_eq!(names(&st.new_here), ["Layer"]);
+    // WowUp no longer lists Spoken, so its next update can't reinstall it.
+    assert!(!mac.wowup_record_names().contains(&"Spoken".to_owned()));
+    assert!(st.wowup_leftovers.is_empty());
     mac.sync(&remote, nw, FirstSync::UseCloud);
     assert_eq!(mac.synced_names(), ["Layer", "Plater"], "kept addon is back on the list; Spoken stays off");
     pc.sync(&remote, nw, FirstSync::UseCloud);
@@ -505,4 +516,29 @@ fn uninstalls_survive_wowup_updates_and_mid_update_scans() {
     assert_eq!(names(&st.missing), ["Layer", "Spoken"], "only what the Mac added");
     assert!(st.removed_here.is_empty(), "Plater is updating, not uninstalled");
     assert!(mac.synced_names().contains(&"Plater".to_owned()));
+    assert!(st.wowup_leftovers.is_empty(), "in the list, so updating, not a leftover");
+
+    // 6. The PC uninstalls Layer, and the Mac removes it the way older
+    //    versions did (folder to trash, WowUp record left behind): a leftover
+    //    WowUp would reinstall, cleared on request.
+    pc.set_wowup(&[("Plater", "1", "v1"), ("Layer", "2", "45"), ("Spoken", "3", "12")]);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    pc.set_wowup(&[("Plater", "1", "v1"), ("Spoken", "3", "12")]);
+    pc.sync(&remote, nw, FirstSync::UseCloud);
+    mac.sync(&remote, nw, FirstSync::UseCloud);
+    let s = mac.addon_status();
+    assert_eq!(names(&s.removed_elsewhere), ["Layer"]);
+    fs::remove_dir_all(mac.root.join("_forever_/Interface/AddOns/Layer")).unwrap();
+    mac.engine_do(|engine, _, _| engine.forget_addons(&s.removed_elsewhere).unwrap());
+    assert_eq!(names(&mac.addon_status().wowup_leftovers), ["Layer"]);
+    mac.engine_do(|engine, install, store| {
+        let inv = foreversync_addons::load_inventory(&engine.wowup_dirs, &install.flavor_dir, &install.addons_dir()).unwrap();
+        let observed = store.files_at_ref(&engine.disk_ref()).unwrap();
+        let plan = addon_cleanup::plan(&store.head_files().unwrap(), observed.as_ref(), &inv, Some(&[]));
+        assert!(plan.packages.is_empty() && plan.folders.is_empty());
+        let r = addon_cleanup::execute(&install.addons_dir(), &inv, &plan).unwrap();
+        assert_eq!(r.forgotten, ["Layer"]);
+    });
+    assert!(mac.addon_status().wowup_leftovers.is_empty());
+    assert!(!mac.wowup_record_names().contains(&"Layer".to_owned()));
 }

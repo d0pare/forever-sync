@@ -346,7 +346,9 @@ pub async fn addon_removal_plan(app: AppHandle, keys: Option<Vec<AddonKey>>) -> 
     .await
 }
 
-/// Moves addons uninstalled on other computers to the AddOns trash.
+/// Moves addons uninstalled on other computers to the AddOns trash and drops
+/// their WowUp records (plus any WowUp leftovers). `keys: []` clears only the
+/// leftovers.
 #[tauri::command]
 pub async fn remove_addons(app: AppHandle, keys: Option<Vec<AddonKey>>) -> CmdResult<RemovalReport> {
     blocking(move || {
@@ -359,7 +361,7 @@ pub async fn remove_addons(app: AppHandle, keys: Option<Vec<AddonKey>>) -> CmdRe
         }
         let inv = ctx.inventory?;
         let plan = addon_cleanup::plan(&ctx.synced, ctx.observed.as_ref(), &inv, only_keys(&keys).as_deref());
-        let report = addon_cleanup::execute(&ctx.install.addons_dir(), &plan).map_err(|e| e.to_string())?;
+        let report = addon_cleanup::execute(&ctx.install.addons_dir(), &inv, &plan).map_err(|e| e.to_string())?;
         // Forget them here, so a later reinstall counts as new.
         let engine = Engine::new(&ctx.install, &ctx.store, &appdata::backups_dir(&state.data_dir));
         engine.forget_addons(&plan.packages).map_err(|e| e.to_string())?;

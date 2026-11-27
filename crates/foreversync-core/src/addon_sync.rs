@@ -122,6 +122,10 @@ pub struct AddonStatus {
     pub removed_here: Vec<PackageFile>,
     /// Installed here and in the synced list.
     pub in_sync: usize,
+    /// Not in the synced list, folders gone, but WowUp still lists them
+    /// (removed outside WowUp, e.g. by an older Forever Sync). WowUp would
+    /// reinstall them on its next update, so they should be cleared from it.
+    pub wowup_leftovers: Vec<PackageFile>,
     /// WowUp import string for just the missing addons.
     pub missing_import: Option<String>,
 }
@@ -149,7 +153,9 @@ pub fn status(synced: &FileSet, observed: Option<&FileSet>, inv: &Inventory) -> 
         local.iter().filter(|p| !s_keys.contains(&p.key())).cloned().partition(|p| o_keys.contains(&p.key()));
     let in_sync = local.len() - removed_elsewhere.len() - new_here.len();
     let missing_import = (!missing.is_empty()).then(|| import_for(&missing));
-    AddonStatus { missing, removed_elsewhere, new_here, removed_here, in_sync, missing_import }
+    let wowup_leftovers =
+        inv.stale.iter().map(PackageFile::from).filter(|p| !s_keys.contains(&p.key())).collect();
+    AddonStatus { missing, removed_elsewhere, new_here, removed_here, in_sync, missing_import, wowup_leftovers }
 }
 
 /// Where one addon stands, for the addon list UI.

@@ -536,6 +536,15 @@ fn addons(
                         println!("  {}", p.name);
                     }
                 }
+                if !st.wowup_leftovers.is_empty() {
+                    println!(
+                        "WowUp still lists {} removed addon(s) and would reinstall them; clear with --remove-uninstalled:",
+                        st.wowup_leftovers.len()
+                    );
+                    for p in &st.wowup_leftovers {
+                        println!("  {}", p.name);
+                    }
+                }
             }
         }
         println!("\nWowUp import string ({} chars): run with --import-string to print it", string.len());
@@ -548,7 +557,7 @@ fn remove_uninstalled(engine: &Engine, install: &ForeverInstall, store: &Store, 
     let inv = load_inventory(&dirs, &install.flavor_dir, &install.addons_dir())?;
     let observed = store.files_at_ref(&engine.disk_ref())?;
     let plan = addon_cleanup::plan(&store.head_files()?, observed.as_ref(), &inv, None);
-    if plan.packages.is_empty() {
+    if plan.packages.is_empty() && plan.wowup_leftovers.is_empty() {
         println!("Nothing to remove: every addon here is in the synced list.");
         return Ok(());
     }
@@ -563,6 +572,12 @@ fn remove_uninstalled(engine: &Engine, install: &ForeverInstall, store: &Store, 
     for f in &plan.kept_shared {
         println!("  (kept, still used by another addon: {f})");
     }
+    if !plan.wowup_leftovers.is_empty() {
+        println!("WowUp still lists these after an earlier removal (records to clear):");
+        for p in &plan.wowup_leftovers {
+            println!("  {}", p.name);
+        }
+    }
     if !yes {
         println!("Run again with --yes to move them.");
         return Ok(());
@@ -570,9 +585,9 @@ fn remove_uninstalled(engine: &Engine, install: &ForeverInstall, store: &Store, 
     if process::forever_running(&install.flavor_dir) {
         bail!("Quit WoW Forever first; addons can't be removed while the game is running.");
     }
-    let r = addon_cleanup::execute(&install.addons_dir(), &plan)?;
+    let r = addon_cleanup::execute(&install.addons_dir(), &inv, &plan)?;
     engine.forget_addons(&plan.packages)?;
-    println!("Moved {} folder(s).", r.moved.len());
+    println!("Moved {} folder(s); cleared {} WowUp record(s).", r.moved.len(), r.forgotten.len());
     if let Some(t) = r.trash_dir {
         println!("They're in {} (emptied after 30 days); move them back to restore.", t.display());
     }

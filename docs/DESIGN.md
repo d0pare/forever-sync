@@ -214,7 +214,7 @@ ForeverSync-Version: 0.1.0
 Addons that WowUp doesn't manage (hand-installed, or ones WowUp couldn't match) are **not synced**. The app lists them as "not managed by WowUp" so the user knows to add them to WowUp or install them by hand.
 
 ### 6.1 Inventory: what is installed
-1. **WowUp records (primary):** `addons.json` in WowUp's app data folder: `~/Library/Application Support/WowUpCf/` on macOS, `%APPDATA%\WowUpCf\` on Windows (to verify, S3). Plain WowUp uses `WowUp/` instead of `WowUpCf/`. Read-only; we never write WowUp's files.
+1. **WowUp records (primary):** `addons.json` in WowUp's app data folder: `~/Library/Application Support/WowUpCf/` on macOS, `%APPDATA%\WowUpCf\` on Windows (to verify, S3). Plain WowUp uses `WowUp/` instead of `WowUpCf/`. Read-only, except that removing an addon (§6.5) also deletes its WowUp record.
    - Pick the Forever installation from `preferences.json` → `wow_installations[]`, the entry with `clientType: 10` (WowUp's `WowClientType.Forever`). Use its `id` to filter `addons.json` records by `installationId`.
    - Useful record fields: `providerName` (`Curse`, `WowUpHub`, `GitHub`, `WowInterface`, `Wago`, …), `externalId`, `installedExternalReleaseId`, `installedVersion`, `installedFolders` (comma-separated), `isIgnored`, `installedAt`.
    - **Remove duplicate records:** the reference file has 2 stale duplicates for the same `(providerName, externalId)` with different versions. Keep the record whose folders exist on disk and whose `installedAt` is newest.
@@ -289,7 +289,9 @@ WowUp's import adds addons but never removes them, so Forever Sync can do the re
 - **Only** WowUp-managed addons that are installed here but gone from the synced list. Folders WowUp doesn't manage are never touched, and neither is any folder another kept or synced addon still lists (e.g. a shared library folder).
 - **Recoverable:** folders are *moved* to `_forever_/Interface/.foreversync-trash/<unix-ms>/`. It's on the same drive, so it's instant, and WoW loads only `Interface/AddOns`. Batches older than 30 days are purged when the app starts. To restore, move the folder back.
 - **Never while the game runs** (Windows may hold the files open).
-- After moving, the addons are dropped from this machine's observed list, so a later reinstall counts as new and goes back on the list. WowUp drops its record of the addon the next time it scans; until then the record is stale and ignored.
+- **WowUp's record goes too.** WowUp never checks its records against the disk (only its manual *Rescan Folders* does), so an addon whose folders were moved stays "installed" in WowUp. WowUp then reinstalls it on its next update, and the next sync puts it back on the list. So after moving the folders, Forever Sync deletes those addons' records from WowUp's `addons.json`, the same way WowUp's own *Remove* does. This is the only write to WowUp's files. WowUp keeps `addons.json` in electron-store, which re-reads the file on every access, so this is safe while WowUp runs (an open *My Addons* list catches up after a restart). The file is replaced atomically, with WowUp's key order and tab indent, and the previous copy is saved in the trash batch as `wowup-addons.json`.
+- **Leftovers:** records an older version left behind (the folders are gone, and the addon isn't on the synced list) are shown as "WowUp still lists N removed addons", with a button to clear them. Any removal also clears them. Records whose addon is still on the synced list are mid-update and are left alone.
+- After moving, the addons are dropped from this machine's observed list, so a later reinstall counts as new and goes back on the list.
 
 ---
 

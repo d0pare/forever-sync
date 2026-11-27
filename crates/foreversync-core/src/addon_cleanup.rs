@@ -9,6 +9,10 @@
 //!   (same drive, so instant; WoW only loads `Interface/AddOns`), not deleted;
 //!   trash older than [`TRASH_KEEP`] is purged;
 //! * callers must check the game isn't running (Windows may hold files open).
+//!
+//! WowUp never checks its records against the disk, so a removed addon's
+//! record is dropped from WowUp too; otherwise WowUp reinstalls it on its next
+//! update (and the next sync adds it back to the list).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -16,7 +20,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use foreversync_addons::Inventory;
+use foreversync_addons::{Inventory, forget_records};
 use serde::Serialize;
 
 use crate::FileSet;
@@ -33,17 +37,23 @@ pub struct RemovalPlan {
     pub folders: Vec<String>,
     /// Folders of those addons kept because another addon still uses them.
     pub kept_shared: Vec<String>,
+    /// Addons WowUp still lists after an earlier removal (see
+    /// [`addon_sync::AddonStatus::wowup_leftovers`]); their records go too.
+    pub wowup_leftovers: Vec<PackageFile>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RemovalReport {
     pub moved: Vec<String>,
     pub trash_dir: Option<PathBuf>,
+    /// Names of the WowUp records dropped.
+    pub forgotten: Vec<String>,
 }
 
 /// What removing the uninstalled-elsewhere addons would do. `observed` is
 /// this machine's addon list at its last sync (see [`addon_sync::status`]).
 /// `only` limits it to those `(provider, id)` keys; `None` means all of them.
+/// WowUp leftovers are always included.
 pub fn plan(
     synced: &FileSet,
     observed: Option<&FileSet>,
@@ -51,6 +61,7 @@ pub fn plan(
     only: Option<&[(String, String)]>,
 ) -> RemovalPlan {
     let status = addon_sync::status(synced, observed, local);
+    let wowup_leftovers = status.wowup_leftovers;
     let packages: Vec<PackageFile> = status
         .removed_elsewhere
         .into_iter()
@@ -72,7 +83,12 @@ pub fn plan(
     for f in packages.iter().flat_map(|p| p.folders.iter()) {
         if needed.contains(f) { kept_shared.insert(f.clone()) } else { folders.insert(f.clone()) };
     }
-    RemovalPlan { packages, folders: folders.into_iter().collect(), kept_shared: kept_shared.into_iter().collect() }
+    RemovalPlan {
+        packages,
+        folders: folders.into_iter().collect(),
+        kept_shared: kept_shared.into_iter().collect(),
+        wowup_leftovers,
+    }
 }
 
 /// A plain folder name directly inside AddOns (no separators, not hidden).
@@ -84,12 +100,11 @@ fn safe_name(name: &str) -> bool {
         && !name.contains(['/', '\\', ':'])
 }
 
-/// Moves the planned folders out of `addons_dir` into a new trash folder.
-pub fn execute(addons_dir: &Path, plan: &RemovalPlan) -> io::Result<RemovalReport> {
+/// Moves the planned folders out of `addons_dir` into a new trash folder,
+/// then drops WowUp's records of the removed addons and the leftovers (the
+/// old `addons.json` is saved in the trash folder as `wowup-addons.json`).
+pub fn execute(addons_dir: &Path, local: &Inventory, plan: &RemovalPlan) -> io::Result<RemovalReport> {
     let mut report = RemovalReport::default();
-    if plan.folders.is_empty() {
-        return Ok(report);
-    }
     let interface = addons_dir.parent().ok_or_else(|| io::Error::other("AddOns folder has no parent"))?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let trash = interface.join(TRASH_DIR).join(stamp.to_string());
@@ -107,6 +122,17 @@ pub fn execute(addons_dir: &Path, plan: &RemovalPlan) -> io::Result<RemovalRepor
         fs::rename(&from, trash.join(name))?;
         report.moved.push(name.clone());
         report.trash_dir = Some(trash.clone());
+    }
+
+    let keys: Vec<(String, String)> =
+        plan.packages.iter().chain(&plan.wowup_leftovers).map(|p| (p.provider.clone(), p.id.clone())).collect();
+    if !keys.is_empty() {
+        let backup = trash.join("wowup-addons.json");
+        report.forgotten = forget_records(&local.wowup_dir, &local.installation_id, &keys, Some(&backup))
+            .map_err(io::Error::other)?;
+        if !report.forgotten.is_empty() {
+            report.trash_dir = Some(trash);
+        }
     }
     Ok(report)
 }
@@ -187,25 +213,62 @@ mod tests {
         assert!(plan(&synced, None, &local, None).folders.is_empty());
     }
 
+    /// A WowUp data folder listing `records` as `(name, id, folders)` for installation "i".
+    fn wowup_with(dir: &Path, records: &[(&str, &str, &str)]) -> Inventory {
+        let map: serde_json::Map<String, serde_json::Value> = records
+            .iter()
+            .map(|(name, id, folders)| {
+                let rec = serde_json::json!({
+                    "id": format!("rec-{id}"), "name": name, "installationId": "i", "providerName": "Curse",
+                    "externalId": id, "installedFolders": folders, "isIgnored": false,
+                });
+                (format!("rec-{id}"), rec)
+            })
+            .collect();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("addons.json"), serde_json::Value::Object(map).to_string()).unwrap();
+        Inventory { wowup_dir: dir.to_path_buf(), ..inv(vec![]) }
+    }
+
+    fn record_ids(dir: &Path) -> Vec<String> {
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(dir.join("addons.json")).unwrap()).unwrap();
+        map.keys().cloned().collect()
+    }
+
+    fn package(name: &str, id: &str) -> PackageFile {
+        PackageFile::from(&addon(name, id, &[name]))
+    }
+
     #[test]
-    fn moves_to_trash_and_purges_old_batches() {
+    fn moves_to_trash_forgets_wowup_records_and_purges_old_batches() {
         let tmp = tempfile::tempdir().unwrap();
         let addons = tmp.path().join("Interface/AddOns");
         for f in ["Extra", "Extra_Options", "Keep", "HandMade"] {
             fs::create_dir_all(addons.join(f)).unwrap();
             fs::write(addons.join(f).join(format!("{f}.toc")), "## Title: x").unwrap();
         }
+        let wowup = tmp.path().join("WowUp");
+        let local = wowup_with(
+            &wowup,
+            &[("Extra", "3", "Extra,Extra_Options"), ("Keep", "5", "Keep"), ("Old", "6", "Old")],
+        );
         let p = RemovalPlan {
-            packages: vec![],
+            packages: vec![package("Extra", "3")],
             folders: vec!["Extra".into(), "Extra_Options".into(), "AlreadyGone".into()],
             kept_shared: vec![],
+            wowup_leftovers: vec![package("Old", "6")],
         };
-        let r = execute(&addons, &p).unwrap();
+        let r = execute(&addons, &local, &p).unwrap();
         assert_eq!(r.moved, ["Extra", "Extra_Options"]);
         let trash = r.trash_dir.unwrap();
         assert!(trash.join("Extra/Extra.toc").exists());
         assert!(!addons.join("Extra").exists());
         assert!(addons.join("Keep").exists() && addons.join("HandMade").exists());
+        // WowUp won't reinstall them: their records are gone (a copy is kept).
+        assert_eq!(r.forgotten, ["Extra", "Old"]);
+        assert_eq!(record_ids(&wowup), ["rec-5"]);
+        assert!(trash.join("wowup-addons.json").exists());
 
         // Nothing is old enough yet; with zero retention the batch goes.
         assert_eq!(purge_trash(&addons, TRASH_KEEP).unwrap(), 0);
@@ -215,13 +278,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_includes_wowup_leftovers() {
+        let synced = addon_sync::files_from_inventory(&inv(vec![addon("Plater", "1", &["Plater"])]));
+        let mut local = inv(vec![addon("Plater", "1", &["Plater"])]);
+        // Old was removed before WowUp records were cleared; Plater is updating.
+        local.stale = vec![addon("Old", "6", &["Old"]), addon("Plater", "1", &["Plater"])];
+        let p = plan(&synced, Some(&synced), &local, Some(&[]));
+        assert!(p.packages.is_empty());
+        assert_eq!(p.wowup_leftovers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Old"]);
+    }
+
+    #[test]
     fn refuses_unsafe_names() {
         let tmp = tempfile::tempdir().unwrap();
         let addons = tmp.path().join("Interface/AddOns");
         fs::create_dir_all(&addons).unwrap();
         for bad in ["..", "../WTF", ".hidden", "a/b", "C:x"] {
-            let p = RemovalPlan { packages: vec![], folders: vec![bad.into()], kept_shared: vec![] };
-            assert!(execute(&addons, &p).is_err(), "{bad}");
+            let p = RemovalPlan { folders: vec![bad.into()], ..Default::default() };
+            assert!(execute(&addons, &inv(vec![]), &p).is_err(), "{bad}");
         }
     }
 }

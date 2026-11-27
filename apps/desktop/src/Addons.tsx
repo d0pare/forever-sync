@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, AddonKey, AddonRow, AddonState, AddonsView, PackageFile, RemovalPlan } from "./api";
+import { api, AddonKey, AddonRow, AddonState, AddonsView, PackageFile, RemovalPlan, RemovalReport } from "./api";
 import { plural, useCopy } from "./util";
 
 const STATE: Record<AddonState, { label: string; cls: string; hint: string }> = {
@@ -65,6 +65,9 @@ export function Addons({ lastSyncAt, onChange }: { lastSyncAt: number; onChange:
       {st && st.missing.length > 0 && <ToInstall missing={st.missing} importString={st.missing_import!} />}
       {st && st.removed_elsewhere.length > 0 && (
         <RemovedElsewhere addons={st.removed_elsewhere} gameRunning={view.game_running} onDone={refresh} />
+      )}
+      {st && st.wowup_leftovers.length > 0 && st.removed_elsewhere.length === 0 && (
+        <Leftovers addons={st.wowup_leftovers} onDone={refresh} />
       )}
       {st && (st.new_here.length > 0 || st.removed_here.length > 0) && <Pending status={st} onDone={refresh} />}
       {view.rows.length > 0 && <AddonTable rows={view.rows} unmanaged={view.unmanaged_folders} />}
@@ -168,7 +171,7 @@ function RemovedElsewhere({
     run("remove", async () => {
       const r = await api.removeAddons(selected);
       setPlan(null);
-      onDone(`Moved ${plural(r.moved.length, "folder")} to the addon trash (kept for 30 days).`);
+      onDone(removedMessage(r));
     });
   const keep = () =>
     run("keep", async () => {
@@ -181,8 +184,8 @@ function RemovedElsewhere({
     <section className="attention">
       <h2>{plural(addons.length, "addon")} removed on another computer</h2>
       <p className="muted small">
-        WowUp’s import adds addons but never removes them. Move these to the trash here, or keep them and put them
-        back on the list for every computer.
+        WowUp’s import adds addons but never removes them. Remove them here (folders go to the trash and they come off
+        WowUp’s list), or keep them and put them back on the list for every computer.
       </p>
       <ul className="checks">
         {addons.map((p) => {
@@ -206,12 +209,25 @@ function RemovedElsewhere({
           {plan.kept_shared.length > 0 && (
             <p className="muted small">Kept because another addon still uses them: {plan.kept_shared.join(", ")}</p>
           )}
+          <p className="muted small">
+            {plural(plan.packages.length, "addon")} also come{plan.packages.length === 1 ? "s" : ""} off WowUp’s list, so
+            WowUp won’t reinstall {plan.packages.length === 1 ? "it" : "them"}
+            {plan.wowup_leftovers.length > 0 &&
+              `, along with ${plural(plan.wowup_leftovers.length, "addon")} an earlier removal left there (${plan.wowup_leftovers
+                .map((p) => p.name)
+                .join(", ")})`}
+            . {WOWUP_OPEN_HINT}
+          </p>
           <div className="row">
             <button onClick={() => setPlan(null)} disabled={!!busy}>
               Cancel
             </button>
-            <button className="primary" onClick={remove} disabled={!!busy || plan.folders.length === 0}>
-              {busy === "remove" ? "Removing…" : `Move ${plural(plan.folders.length, "folder")} to trash`}
+            <button className="primary" onClick={remove} disabled={!!busy || plan.packages.length === 0}>
+              {busy === "remove"
+                ? "Removing…"
+                : plan.folders.length > 0
+                  ? `Move ${plural(plan.folders.length, "folder")} to trash`
+                  : "Remove from WowUp’s list"}
             </button>
           </div>
         </div>
@@ -226,6 +242,48 @@ function RemovedElsewhere({
         </div>
       )}
       {gameRunning && <p className="warn small">Quit WoW Forever to remove addons.</p>}
+      {error && <p className="error">{error}</p>}
+    </section>
+  );
+}
+
+const WOWUP_OPEN_HINT = "If WowUp is open, restart it so its list catches up.";
+
+function removedMessage(r: RemovalReport): string {
+  const parts = [];
+  if (r.moved.length > 0) parts.push(`Moved ${plural(r.moved.length, "folder")} to the addon trash (kept for 30 days).`);
+  if (r.forgotten.length > 0)
+    parts.push(`Removed ${plural(r.forgotten.length, "addon")} from WowUp’s list. ${WOWUP_OPEN_HINT}`);
+  return parts.join(" ") || "Nothing needed removing.";
+}
+
+/** WowUp records an older version left behind when it moved addons to the trash. */
+function Leftovers({ addons, onDone }: { addons: PackageFile[]; onDone: (msg: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const clear = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onDone(removedMessage(await api.removeAddons([])));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="attention">
+      <h2>WowUp still lists {plural(addons.length, "removed addon")}</h2>
+      <p className="muted small">
+        Their folders are gone and they’re off the synced list, but WowUp still has them and would reinstall them on its
+        next update: {addons.map((p) => p.name).join(", ")}.
+      </p>
+      <div className="actions">
+        <button className="primary" onClick={clear} disabled={busy}>
+          {busy ? "Clearing…" : "Clear from WowUp"}
+        </button>
+      </div>
       {error && <p className="error">{error}</p>}
     </section>
   );

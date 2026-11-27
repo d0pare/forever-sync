@@ -1,4 +1,8 @@
-//! Read-only access to WowUp's `preferences.json` and `addons.json`.
+//! Access to WowUp's `preferences.json` and `addons.json`.
+//!
+//! Everything here only reads, except [`forget_records`]: removing an addon's
+//! folders isn't enough, because WowUp never checks its records against the
+//! disk and would reinstall the addon on its next update.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -166,6 +170,64 @@ impl AddonRecord {
         };
         list.into_iter().filter(|s| !s.is_empty()).collect()
     }
+}
+
+/// Deletes WowUp's records of these `(provider, external_id)` addons in one
+/// installation, as WowUp's own "Remove" does after deleting the folders.
+/// Returns the names of the records removed.
+///
+/// WowUp keeps `addons.json` in electron-store, which re-reads the file on
+/// every access, so this is safe while WowUp runs (an open "My addons" list
+/// still shows the addon until it's refreshed). The file is replaced
+/// atomically, keeps WowUp's key order and tab indent, and the original is
+/// copied to `backup` first when given.
+pub fn forget_records(
+    wowup_dir: &Path,
+    installation_id: &str,
+    keys: &[(String, String)],
+    backup: Option<&Path>,
+) -> Result<Vec<String>, WowUpError> {
+    let path = wowup_dir.join("addons.json");
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| WowUpError::Io { path, source }
+    };
+    let original = fs::read(&path).map_err(io(&path))?;
+    let mut records: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&original).map_err(|source| WowUpError::Parse { path: path.clone(), source })?;
+
+    let text = |v: &serde_json::Value, field: &str| match v.get(field) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(), // legacy numeric ids
+        _ => String::new(),
+    };
+    let mut removed = Vec::new();
+    records.retain(|_, rec| {
+        let matches = text(rec, "installationId") == installation_id
+            && keys.iter().any(|(provider, id)| text(rec, "providerName") == *provider && text(rec, "externalId") == *id);
+        if matches {
+            removed.push(text(rec, "name"));
+        }
+        !matches
+    });
+    if removed.is_empty() {
+        return Ok(removed);
+    }
+
+    if let Some(backup) = backup {
+        if let Some(dir) = backup.parent() {
+            fs::create_dir_all(dir).map_err(io(dir))?;
+        }
+        fs::write(backup, &original).map_err(io(backup))?;
+    }
+    let mut out = Vec::new();
+    let fmt = serde_json::ser::PrettyFormatter::with_indent(b"\t");
+    serde::Serialize::serialize(&records, &mut serde_json::Serializer::with_formatter(&mut out, fmt))
+        .map_err(|source| WowUpError::Parse { path: path.clone(), source })?;
+    let tmp = wowup_dir.join("addons.json.foreversync-tmp");
+    fs::write(&tmp, &out).map_err(io(&tmp))?;
+    fs::rename(&tmp, &path).map_err(io(&path))?;
+    Ok(removed)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, WowUpError> {
@@ -378,6 +440,43 @@ mod tests {
         write(&wowup.join("addons.json"), json!({}));
         let err = load_inventory(&[wowup], tmp.path(), tmp.path()).unwrap_err();
         assert!(matches!(err, WowUpError::NoForeverInstallation));
+    }
+
+    #[test]
+    fn forgets_only_the_given_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wowup = tmp.path().join("WowUp");
+        let mut other = record("o", "Gone", "4", "1", "Gone", "2024-01-01");
+        other["installationId"] = json!("inst-retail");
+        let mut legacy = record("l", "Legacy", "9", "1", "Legacy", "2024-01-01");
+        legacy["externalId"] = json!(9);
+        write(
+            &wowup.join("addons.json"),
+            json!({
+                "z": record("z", "Plater", "1", "1", "Plater", "2024-01-01"),
+                "a": record("a", "Gone", "4", "1", "Gone", "2024-01-01"),
+                "a2": record("a2", "Gone", "4", "0", "Gone", "2023-01-01"),
+                "o": other,
+                "l": legacy,
+            }),
+        );
+        let keys = [("Curse".to_string(), "4".to_string()), ("Curse".to_string(), "9".to_string())];
+        let backup = tmp.path().join("trash/1/wowup-addons.json");
+        let removed = forget_records(&wowup, "inst-forever", &keys, Some(&backup)).unwrap();
+        assert_eq!(removed, ["Gone", "Gone", "Legacy"]);
+
+        let text = fs::read_to_string(wowup.join("addons.json")).unwrap();
+        let left: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), ["z", "o"], "order kept, other installation untouched");
+        assert!(text.contains("\n\t\"z\": {"), "tab indent like electron-store");
+        let saved: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(&backup).unwrap()).unwrap();
+        assert_eq!(saved.len(), 5);
+
+        // Nothing to forget: the file isn't rewritten.
+        let before = fs::metadata(wowup.join("addons.json")).unwrap().modified().unwrap();
+        assert!(forget_records(&wowup, "inst-forever", &keys, None).unwrap().is_empty());
+        assert_eq!(fs::metadata(wowup.join("addons.json")).unwrap().modified().unwrap(), before);
     }
 
     #[test]

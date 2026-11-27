@@ -49,9 +49,15 @@ export type AddonStatus = {
   removed_here: PackageFile[];
   in_sync: number;
   missing_import: string | null;
+  wowup_leftovers: PackageFile[];
 };
-export type RemovalPlan = { packages: PackageFile[]; folders: string[]; kept_shared: string[] };
-export type RemovalReport = { moved: string[]; trash_dir: string | null };
+export type RemovalPlan = {
+  packages: PackageFile[];
+  folders: string[];
+  kept_shared: string[];
+  wowup_leftovers: PackageFile[];
+};
+export type RemovalReport = { moved: string[]; trash_dir: string | null; forgotten: string[] };
 export type AddonState = "in_sync" | "missing" | "removed_elsewhere" | "new_here" | "removed_here" | "updating";
 export type AddonRow = {
   name: string;
